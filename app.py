@@ -1,39 +1,54 @@
 import streamlit as st
-import requests
 import ccxt
 import pandas as pd
 import time
 
 st.set_page_config(page_title="Cross-Exchange Arbitrage Scanner", layout="wide")
-st.title("Cross-Exchange Arbitrage Scanner")
+st.title("🌍 Cross-Exchange Arbitrage Scanner")
 
-# ------------------- Fetch top 20 exchanges -------------------
-@st.cache_data
-def get_top_exchanges(limit=20):
-    url = f"https://api.coingecko.com/api/v3/exchanges?per_page={limit}&page=1"
-    r = requests.get(url, timeout=10)
-    data = r.json()
-    # Only keep name + id
-    return [(ex["name"], ex["id"]) for ex in data]
+# ------------------- Top 20 High-Volume Spot Exchanges -------------------
+TOP_20_CCXT_EXCHANGES = [
+    "binance", "okx", "coinbase", "kraken", "bybit", "kucoin",
+    "mexc3", "bitfinex", "bitget", "gateio", "htx", "crypto_com",
+    "upbit", "bitmart", "whitebit", "poloniex", "bingx", "lbank",
+    "bitstamp", "gemini"
+]
 
-top_exchanges = get_top_exchanges()
+EXCHANGE_NAMES = {
+    "binance": "Binance",
+    "okx": "OKX",
+    "coinbase": "Coinbase",
+    "kraken": "Kraken",
+    "bybit": "Bybit",
+    "kucoin": "KuCoin",
+    "mexc3": "MEXC",
+    "bitfinex": "Bitfinex",
+    "bitget": "Bitget",
+    "gateio": "Gate.io",
+    "htx": "HTX (Huobi)",
+    "crypto_com": "Crypto.com",
+    "upbit": "Upbit",
+    "bitmart": "Bitmart",
+    "whitebit": "WhiteBIT",
+    "poloniex": "Poloniex",
+    "bingx": "BingX",
+    "lbank": "LBank",
+    "bitstamp": "Bitstamp",
+    "gemini": "Gemini"
+}
 
 # ------------------- Streamlit UI -------------------
 col1, col2, col3 = st.columns(3)
 with col1:
-    exch1_name = st.selectbox("Select Buy Exchange", [name for name, _id in top_exchanges])
+    exch1_id = st.selectbox("Select Buy Exchange", TOP_20_CCXT_EXCHANGES, format_func=lambda x: EXCHANGE_NAMES[x])
 with col2:
-    exch2_name = st.selectbox("Select Sell Exchange", [name for name, _id in top_exchanges])
+    exch2_id = st.selectbox("Select Sell Exchange", TOP_20_CCXT_EXCHANGES, format_func=lambda x: EXCHANGE_NAMES[x])
 with col3:
     min_profit = st.number_input("Profit % Threshold", min_value=0.0, value=0.2, step=0.1)
 
-# Save selected exchange ids
-exch1_id = [eid for name, eid in top_exchanges if name == exch1_name][0]
-exch2_id = [eid for name, eid in top_exchanges if name == exch2_name][0]
+st.write(f"🔍 Ready to scan opportunities between **{EXCHANGE_NAMES[exch1_id]}** and **{EXCHANGE_NAMES[exch2_id]}** with min profit {min_profit}% ...")
 
-st.write(f"🔍 Ready to scan opportunities between **{exch1_name}** and **{exch2_name}** with min profit {min_profit}% ...")
-
-# ------------------- Cache for opportunity stability -------------------
+# ------------------- Stability Cache -------------------
 if "op_cache" not in st.session_state:
     st.session_state.op_cache = {}
 
@@ -81,7 +96,6 @@ def estimate_stability(key, profit_after):
 if st.button("Scan Now"):
     with st.spinner("Scanning arbitrage opportunities..."):
         try:
-            # Load exchanges
             ex1 = getattr(ccxt, exch1_id)()
             ex2 = getattr(ccxt, exch2_id)()
             ex1.load_markets()
@@ -122,10 +136,10 @@ if st.button("Scan Now"):
                     stability = estimate_stability(f"{m}-{ex1.id}-{ex2.id}", profit_after)
                     results.append({
                         "Pair": m,
-                        "Buy@": exch1_name,
+                        "Buy@": EXCHANGE_NAMES[exch1_id],
                         "Ask": ask1,
                         "Buy Vol (24h)": format_usd(vol1),
-                        "Sell@": exch2_name,
+                        "Sell@": EXCHANGE_NAMES[exch2_id],
                         "Bid": bid2,
                         "Sell Vol (24h)": format_usd(vol2),
                         "Profit % Raw": round(profit_raw, 3),
@@ -143,10 +157,10 @@ if st.button("Scan Now"):
                     stability = estimate_stability(f"{m}-{ex2.id}-{ex1.id}", profit_after)
                     results.append({
                         "Pair": m,
-                        "Buy@": exch2_name,
+                        "Buy@": EXCHANGE_NAMES[exch2_id],
                         "Ask": ask2,
                         "Buy Vol (24h)": format_usd(vol2),
-                        "Sell@": exch1_name,
+                        "Sell@": EXCHANGE_NAMES[exch1_id],
                         "Bid": bid1,
                         "Sell Vol (24h)": format_usd(vol1),
                         "Profit % Raw": round(profit_raw, 3),
