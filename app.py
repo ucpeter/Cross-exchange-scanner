@@ -52,6 +52,8 @@ with col4:
 
 auto_refresh = st.checkbox("🔄 Auto Refresh Every 20 Seconds", value=False)
 
+scan_now = st.button("🚀 Scan Now")
+
 st.write(f"🔍 Scanning Buy: {[EXCHANGE_NAMES[e] for e in buy_exchanges]} → Sell: {[EXCHANGE_NAMES[e] for e in sell_exchanges]}")
 st.write(f"📊 Filtering opportunities between **{min_profit}%** and **{max_profit}%**")
 
@@ -169,10 +171,11 @@ def run_scan():
         st.error(f"Error: {e}")
 
 # ------------------- Auto Refresh with Countdown -------------------
-run_scan()
-if auto_refresh:
-    countdown = st.empty()
-    for i in range(20, 0, -1):
-        countdown.write(f"⏳ Refreshing in {i} seconds...")
-        time.sleep(1)
-    st.experimental_rerun()
+if scan_now or auto_refresh:
+    run_scan()
+    if auto_refresh:
+        countdown = st.empty()
+        for i in range(20, 0, -1):
+            countdown.write(f"⏳ Refreshing in {i} seconds...")
+            time.sleep(1)
+        st.experimental_rerun()
