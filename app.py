@@ -24,7 +24,6 @@ EXCHANGE_NAMES = {
     "bitstamp": "Bitstamp", "gemini": "Gemini",
 }
 
-# Force spot where needed (avoids Bitmart futures deprecation error)
 EXTRA_OPTS = {
     "bitmart": {"options": {"defaultType": "spot"}},
     "bybit": {"options": {"defaultType": "spot"}},
@@ -32,7 +31,6 @@ EXTRA_OPTS = {
     "bingx": {"options": {"defaultType": "spot"}},
 }
 
-# Only compare these quotes (USD-standardized)
 USD_QUOTES = {"USDT", "USD", "USDC", "BUSD"}
 
 LOW_FEE_CHAIN_PRIORITY = ["TRC20", "BEP20", "BSC", "SOL", "MATIC", "ARB", "OP", "Polygon", "TON", "AVAX", "ETH"]
@@ -53,20 +51,18 @@ with r2:
 auto_refresh = st.checkbox("🔄 Auto Refresh Every 20 Seconds", value=False)
 scan_now = st.button("🚀 Scan Now")
 
-st.caption("Tip: For the cleanest results, pick exchanges you actually use and keep buy/sell quotes in USDT/USD/USDC/BUSD.")
-
-# ------------------- Stability cache -------------------
+# ------------------- State -------------------
 if "op_cache" not in st.session_state:
     st.session_state.op_cache = {}  # key -> [(ts, profit%), ...]
+if "lifetime_history" not in st.session_state:
+    st.session_state.lifetime_history = {}  # key -> [durations in sec]
 
 # ------------------- Helpers -------------------
 def parse_symbol(symbol: str):
-    # ccxt normalized symbols are like "SUI/USDT" or "SUI/USDT:USDT"
     base, quote = symbol.split("/")[0], symbol.split("/")[1].split(":")[0]
     return base, quote
 
 def market_price_from_ticker(t):
-    """CMC-style market price: last; fallback to (bid+ask)/2; else None."""
     if not t:
         return None
     last = t.get("last")
@@ -80,7 +76,7 @@ def market_price_from_ticker(t):
 def is_ticker_fresh(t, max_age_sec=300):
     ts = t.get("timestamp")
     if ts is None:
-        return True  # many exchanges omit timestamp; don't over-prune
+        return True
     now = int(time.time() * 1000)
     return (now - int(ts)) <= max_age_sec * 1000
 
@@ -95,7 +91,6 @@ def fmt_usd(x):
         return "$0"
 
 def choose_common_chain(ex1, ex2, coin):
-    """Return (chain_name, withdraw_ok_on_buy, deposit_ok_on_sell) with low-fee priority."""
     try:
         c1 = ex1.currencies.get(coin, {}) or {}
         c2 = ex2.currencies.get(coin, {}) or {}
@@ -104,7 +99,6 @@ def choose_common_chain(ex1, ex2, coin):
         common = set(nets1.keys()) & set(nets2.keys())
         if not common:
             return "❌ No chain", "❌", "❌"
-        # prefer low-fee chains
         for pref in LOW_FEE_CHAIN_PRIORITY:
             if pref in common:
                 best = pref
@@ -117,101 +111,44 @@ def choose_common_chain(ex1, ex2, coin):
     except Exception:
         return "❌ Unknown", "❌", "❌"
 
-def estimate_stability(key, current_profit):
-    """Return '⏳ 35s observed' style label based on how long it keeps showing up."""
+def estimate_stability_and_expiry(key, current_profit):
     now = time.time()
     trail = st.session_state.op_cache.get(key, [])
+
     if not trail or current_profit <= 0:
+        if trail:
+            # record lifetime of previous run
+            duration = trail[-1][0] - trail[0][0]
+            if duration > 0:
+                st.session_state.lifetime_history.setdefault(key, []).append(duration)
         st.session_state.op_cache[key] = [(now, current_profit)]
-        return "⏳ new"
+        return "⏳ new", "~unknown"
+
     trail.append((now, current_profit))
-    st.session_state.op_cache[key] = trail[-30:]  # last ~10 mins if 20s refresh
+    st.session_state.op_cache[key] = trail[-30:]
     duration = trail[-1][0] - trail[0][0]
+
+    # stability string
     if duration < 90:
-        return f"⏳ {int(duration)}s observed"
-    return f"⏳ {duration/60:.1f}m observed"
+        stability = f"⏳ {int(duration)}s observed"
+    else:
+        stability = f"⏳ {duration/60:.1f}m observed"
 
-# Fallback volume keys seen across exchanges inside ticker['info']
-INFO_VOLUME_CANDIDATES = [
-    "quoteVolume", "baseVolume", "vol", "vol24h", "volCcy24h", "volValue",
-    "turnover", "turnover24h", "quoteVolume24h", "amount", "value", "V", "v",
-    "acc_trade_price_24h", "quote_volume_24h", "base_volume_24h",
-]
+    # expiry estimate
+    hist = st.session_state.lifetime_history.get(key, [])
+    if not hist:
+        expiry = "~unknown"
+    else:
+        avg_life = sum(hist) / len(hist)
+        remaining = avg_life - duration
+        if remaining <= 0:
+            expiry = "⚠️ past avg"
+        elif remaining < 90:
+            expiry = f"~{int(remaining)}s left"
+        else:
+            expiry = f"~{remaining/60:.1f}m left"
 
-def safe_usd_volume(ex_id, symbol, ticker, price, all_tickers):
-    """
-    Robust USD volume:
-      1) prefer ticker['quoteVolume'] when quote is USD-like
-      2) else baseVolume * price
-      3) else look into ticker['info'] using known keys
-      4) else 0
-    Then if quote not USD-like, convert using QUOTE/USDT if available.
-    """
-    try:
-        base, quote = parse_symbol(symbol)
-        q_upper = quote.upper()
-        qvol = ticker.get("quoteVolume")
-        bvol = ticker.get("baseVolume")
-
-        # if quote is USD-like and quoteVolume exists, use it directly
-        if q_upper in USD_QUOTES and qvol:
-            return float(qvol)
-
-        # baseVolume * price (works for any quote)
-        if bvol and price:
-            usd_val = float(bvol) * float(price)
-            return usd_val
-
-        # try raw info fields
-        info = ticker.get("info") or {}
-        # take the first numeric candidate
-        raw = None
-        for key in INFO_VOLUME_CANDIDATES:
-            val = info.get(key)
-            if val is None:
-                continue
-            try:
-                fval = float(val)
-                if fval > 0:
-                    raw = fval
-                    break
-            except Exception:
-                continue
-
-        if raw is not None:
-            # If quote USD-like, assume raw already in quote currency (≈USD)
-            if q_upper in USD_QUOTES:
-                return float(raw)
-            # else try convert via QUOTE/USDT
-            conv_sym = f"{q_upper}/USDT"
-            conv_t = all_tickers.get(conv_sym)
-            conv_px = market_price_from_ticker(conv_t)
-            if conv_px:
-                return float(raw) * float(conv_px)
-
-        # last fallback: if quoteVolume exists but quote is not USD-like, convert it
-        if qvol:
-            conv_sym = f"{q_upper}/USDT"
-            conv_t = all_tickers.get(conv_sym)
-            conv_px = market_price_from_ticker(conv_t)
-            if conv_px:
-                return float(qvol) * float(conv_px)
-
-        return 0.0
-    except Exception:
-        return 0.0
-
-def symbol_ok(ex_obj, symbol):
-    m = ex_obj.markets.get(symbol, {})
-    if not m:
-        return False
-    if not m.get("spot", True):
-        return False
-    if m.get("active") is False:
-        return False
-    # Only USD-standardized quotes
-    base, quote = parse_symbol(symbol)
-    return quote.upper() in USD_QUOTES
+    return stability, expiry
 
 # ------------------- Core scan -------------------
 def run_scan():
@@ -220,7 +157,6 @@ def run_scan():
         return
 
     try:
-        # 1) instantiate and load markets
         ex_objs = {}
         for ex_id in set(buy_exchanges + sell_exchanges):
             opts = {"enableRateLimit": True, "timeout": 8000}
@@ -230,7 +166,6 @@ def run_scan():
             ex.load_markets()
             ex_objs[ex_id] = ex
 
-        # 2) bulk fetch tickers (faster; fewer rate-limit hits)
         bulk_tickers = {}
         for ex_id, ex in ex_objs.items():
             try:
@@ -240,8 +175,6 @@ def run_scan():
                 bulk_tickers[ex_id] = {}
 
         results = []
-
-        # 3) compare prices for common symbols (spot, active, USD quotes only)
         for buy_id in buy_exchanges:
             for sell_id in sell_exchanges:
                 if buy_id == sell_id:
@@ -251,9 +184,7 @@ def run_scan():
                 buy_tk, sell_tk = bulk_tickers[buy_id], bulk_tickers[sell_id]
 
                 common = set(buy_ex.markets.keys()) & set(sell_ex.markets.keys())
-                # filter to valid symbols on each side
-                valid_common = [s for s in common if symbol_ok(buy_ex, s) and symbol_ok(sell_ex, s)]
-                # keep snappy
+                valid_common = [s for s in common if s.split("/")[1].split(":")[0].upper() in USD_QUOTES]
                 valid_common = valid_common[:400]
 
                 for sym in valid_common:
@@ -268,12 +199,10 @@ def run_scan():
                     if not buy_px or not sell_px:
                         continue
 
-                    # sanity guard: discard absurd price gaps that are likely stale (e.g., > 50%)
                     gap = abs(sell_px - buy_px) / buy_px
                     if gap > 0.5:
                         continue
 
-                    # fees (taker as conservative default)
                     buy_fee = buy_ex.markets.get(sym, {}).get("taker", 0.001) or 0.001
                     sell_fee = sell_ex.markets.get(sym, {}).get("taker", 0.001) or 0.001
 
@@ -282,17 +211,14 @@ def run_scan():
                     if profit_after < min_profit or profit_after > max_profit:
                         continue
 
-                    # volumes (USD)
-                    buy_vol_usd = safe_usd_volume(buy_id, sym, bt, buy_px, buy_tk)
-                    sell_vol_usd = safe_usd_volume(sell_id, sym, st_, sell_px, sell_tk)
-
                     base, quote = parse_symbol(sym)
                     chain, w_ok, d_ok = choose_common_chain(buy_ex, sell_ex, base)
 
                     key = f"{sym}|{buy_id}>{sell_id}"
-                    stability = estimate_stability(key, profit_after)
+                    stability, expiry = estimate_stability_and_expiry(key, profit_after)
 
                     results.append({
+                        "#": len(results) + 1,
                         "Pair": sym,
                         "Quote": quote,
                         "Buy@": EXCHANGE_NAMES[buy_id],
@@ -301,21 +227,20 @@ def run_scan():
                         "Sell Price": round(float(sell_px), 8),
                         "Spread %": round(spread, 3),
                         "Profit % After Fees": round(profit_after, 3),
-                        "Buy Vol (24h)": fmt_usd(buy_vol_usd),
-                        "Sell Vol (24h)": fmt_usd(sell_vol_usd),
                         "Withdraw?": w_ok,
                         "Deposit?": d_ok,
                         "Blockchain": chain,
                         "Stability": stability,
+                        "Est. Expiry": expiry,
                     })
 
         if results:
-            df = pd.DataFrame(results).sort_values(["Profit % After Fees", "Spread %"], ascending=False)
+            df = pd.DataFrame(results)
             st.subheader("✅ Profitable Opportunities (Market Price, USD-standardized)")
             st.dataframe(df, use_container_width=True)
-            st.download_button("⬇️ Download CSV", df.to_csv(index=False), "arbitrage_opportunities_market_price.csv", "text/csv")
+            st.download_button("⬇️ Download CSV", df.to_csv(index=False), "arbitrage_opportunities.csv", "text/csv")
         else:
-            st.info("No opportunities matched your profit range with clean (USD-quote, spot, active) data right now.")
+            st.info("No opportunities matched your filters right now.")
 
     except Exception as e:
         st.error(f"Error: {e}")
