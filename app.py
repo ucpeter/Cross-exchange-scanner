@@ -3,15 +3,15 @@ import ccxt
 import pandas as pd
 import time
 
-st.set_page_config(page_title="Cross-Exchange Arbitrage Scanner", layout="wide")
-st.title("🌍 Cross-Exchange Arbitrage Scanner")
+st.set_page_config(page_title="Cross-Exchange Arbitrage (Market Price)", layout="wide")
+st.title("🌍 Cross-Exchange Arbitrage Scanner — Market Price (CMC-style)")
 
 # ------------------- Top 20 High-Volume Spot Exchanges -------------------
 TOP_20_CCXT_EXCHANGES = [
     "binance", "okx", "coinbase", "kraken", "bybit", "kucoin",
     "mexc3", "bitfinex", "bitget", "gateio", "htx", "crypto_com",
     "upbit", "bitmart", "whitebit", "poloniex", "bingx", "lbank",
-    "bitstamp", "gemini"
+    "bitstamp", "gemini",
 ]
 
 EXCHANGE_NAMES = {
@@ -21,145 +21,251 @@ EXCHANGE_NAMES = {
     "gateio": "Gate.io", "htx": "HTX (Huobi)", "crypto_com": "Crypto.com",
     "upbit": "Upbit", "bitmart": "Bitmart", "whitebit": "WhiteBIT",
     "poloniex": "Poloniex", "bingx": "BingX", "lbank": "LBank",
-    "bitstamp": "Bitstamp", "gemini": "Gemini"
+    "bitstamp": "Bitstamp", "gemini": "Gemini",
+}
+
+# Some exchanges need explicit "spot" mode to avoid futures API issues
+EXTRA_OPTS = {
+    "bitmart": {"options": {"defaultType": "spot"}},
+    "bybit": {"options": {"defaultType": "spot"}},
+    "okx": {"options": {"defaultType": "spot"}},
+    "bingx": {"options": {"defaultType": "spot"}},
 }
 
 # ------------------- UI -------------------
-col1, col2 = st.columns(2)
-with col1:
-    buy_exchanges = st.multiselect("Select up to 3 Buy Exchanges", TOP_20_CCXT_EXCHANGES,
-                                   max_selections=3, format_func=lambda x: EXCHANGE_NAMES[x])
-with col2:
-    sell_exchanges = st.multiselect("Select up to 3 Sell Exchanges", TOP_20_CCXT_EXCHANGES,
-                                    max_selections=3, format_func=lambda x: EXCHANGE_NAMES[x])
+l, r = st.columns(2)
+with l:
+    buy_exchanges = st.multiselect(
+        "Select up to 3 Buy Exchanges",
+        TOP_20_CCXT_EXCHANGES, max_selections=3,
+        format_func=lambda x: EXCHANGE_NAMES[x]
+    )
+with r:
+    sell_exchanges = st.multiselect(
+        "Select up to 3 Sell Exchanges",
+        TOP_20_CCXT_EXCHANGES, max_selections=3,
+        format_func=lambda x: EXCHANGE_NAMES[x]
+    )
 
-col3, col4 = st.columns(2)
-with col3:
-    min_profit = st.number_input("Minimum Profit %", min_value=0.0, value=0.5, step=0.1)
-with col4:
-    max_profit = st.number_input("Maximum Profit %", min_value=0.0, value=10.0, step=0.1)
+l2, r2 = st.columns(2)
+with l2:
+    min_profit = st.number_input("Minimum Profit % (after fees)", 0.0, 100.0, 0.5, 0.1)
+with r2:
+    max_profit = st.number_input("Maximum Profit % (after fees)", 0.0, 200.0, 20.0, 0.1)
 
 auto_refresh = st.checkbox("🔄 Auto Refresh Every 20 Seconds", value=False)
 scan_now = st.button("🚀 Scan Now")
 
-st.write(f"🔍 Scanning Buy: {[EXCHANGE_NAMES[e] for e in buy_exchanges]} → Sell: {[EXCHANGE_NAMES[e] for e in sell_exchanges]}")
-st.write(f"📊 Filtering opportunities between **{min_profit}%** and **{max_profit}%**")
+st.write(f"🔍 **Buy:** {[EXCHANGE_NAMES[e] for e in buy_exchanges]}  →  **Sell:** {[EXCHANGE_NAMES[e] for e in sell_exchanges]}")
+st.write(f"📊 Showing opportunities with **{min_profit}% ≤ Profit ≤ {max_profit}%**")
 
-# ------------------- State cache -------------------
+# ------------------- State for stability -------------------
 if "op_cache" not in st.session_state:
-    st.session_state.op_cache = {}
+    st.session_state.op_cache = {}  # key -> [(ts, profit%), ...]
 
 # ------------------- Helpers -------------------
-def format_usd(val):
-    if val > 1e9: return f"${val/1e9:.2f}B"
-    if val > 1e6: return f"${val/1e6:.2f}M"
-    return f"${val:,.0f}"
+LOW_FEE_CHAIN_PRIORITY = ["TRC20", "BEP20", "BSC", "SOL", "MATIC", "ARB", "OP", "Polygon", "TON", "AVAX", "ETH"]
 
-def check_transferability(ex1, ex2, coin):
+def choose_common_chain(ex1, ex2, coin):
+    """Return (chain_name, withdraw_ok_on_buy, deposit_ok_on_sell) with low-fee priority."""
     try:
-        c1, c2 = ex1.currencies.get(coin, {}), ex2.currencies.get(coin, {})
-        nets1, nets2 = set(c1.get("networks", {}).keys()), set(c2.get("networks", {}).keys())
-        common = nets1 & nets2
-        if not common: return "❌ No chain", "❌", "❌"
-        chain = list(common)[0]  # take first common chain
-        w1 = "✅" if c1["networks"][chain].get("withdraw") else "❌"
-        d2 = "✅" if c2["networks"][chain].get("deposit") else "❌"
-        return chain, w1, d2
+        c1 = ex1.currencies.get(coin, {}) or {}
+        c2 = ex2.currencies.get(coin, {}) or {}
+        nets1 = c1.get("networks", {}) or {}
+        nets2 = c2.get("networks", {}) or {}
+        common = set(nets1.keys()) & set(nets2.keys())
+        if not common:
+            return "❌ No chain", "❌", "❌"
+        # pick best by priority
+        best = None
+        for pref in LOW_FEE_CHAIN_PRIORITY:
+            if pref in common:
+                best = pref
+                break
+        if not best:
+            best = sorted(list(common))[0]
+        w_ok = "✅" if nets1.get(best, {}).get("withdraw") else "❌"
+        d_ok = "✅" if nets2.get(best, {}).get("deposit") else "❌"
+        return best, w_ok, d_ok
     except Exception:
         return "❌ Unknown", "❌", "❌"
 
-def estimate_stability(key, profit_after):
-    now = time.time()
-    cache = st.session_state.op_cache
-    if key not in cache:
-        cache[key] = [(now, profit_after)]
-        return "⏳ New"
-    cache[key].append((now, profit_after))
-    cache[key] = cache[key][-10:]
-    if len(cache[key]) >= 2:
-        durations = [cache[i+1][0] - cache[i][0] for i in range(len(cache)-1)]
-        avg = sum(durations) / len(durations)
-        if avg < 60:
-            return f"⏳ {int(avg)}s avg"
-        else:
-            return f"⏳ {avg/60:.1f}m avg"
-    return "⏳ New"
+def market_price_from_ticker(t):
+    """CMC-style price: use last; if missing, use (bid+ask)/2; else None."""
+    if not t:
+        return None
+    last = t.get("last")
+    if last:
+        return last
+    bid, ask = t.get("bid"), t.get("ask")
+    if bid and ask:
+        return (bid + ask) / 2.0
+    return None
 
-# ------------------- Arbitrage Scan -------------------
+def estimate_stability(key, current_profit):
+    """
+    Track how long an opp stays profitable.
+    We store timestamps whenever we see it profitable.
+    We return a short human label like '⏳ 35s observed' or '⏳ 2.0m observed'.
+    """
+    now = time.time()
+    trail = st.session_state.op_cache.get(key, [])
+    # if new or profit turned negative earlier, reset window
+    if not trail or current_profit <= 0:
+        st.session_state.op_cache[key] = [(now, current_profit)]
+        return "⏳ new"
+    # append and keep last 30 points (~10 min if 20s refresh)
+    trail.append((now, current_profit))
+    st.session_state.op_cache[key] = trail[-30:]
+    duration = trail[-1][0] - trail[0][0]
+    if duration < 90:
+        return f"⏳ {int(duration)}s observed"
+    else:
+        return f"⏳ {duration/60:.1f}m observed"
+
+def safe_usd_volume(symbol, ticker, all_tickers):
+    """
+    Best-effort USD volume using only what we already have:
+    - Prefer quote = USD/USDT/USDC → baseVolume * price
+    - Else if quote has a USDT market in 'all_tickers', use that to convert
+    - Else fall back to ticker's quoteVolume if present
+    - Else 0
+    """
+    try:
+        base_vol = ticker.get("baseVolume") or 0
+        price = market_price_from_ticker(ticker) or 0
+        if base_vol and price:
+            base, quote = symbol.split("/")
+            quote = quote.upper()
+            # direct USD-like quotes
+            if quote in ("USD", "USDT", "USDC", "BUSD"):
+                return float(base_vol) * float(price)
+            # try quote/USDT conversion
+            qsym = f"{quote}/USDT"
+            qt = all_tickers.get(qsym)
+            qprice = market_price_from_ticker(qt)
+            if qprice:
+                return float(base_vol) * float(price) * float(qprice)
+        # fallback: use quoteVolume if it's already in USD-ish terms
+        qvol = ticker.get("quoteVolume")
+        return float(qvol) if qvol else 0.0
+    except Exception:
+        return 0.0
+
+def fmt_usd(x):
+    try:
+        x = float(x or 0)
+        if x >= 1e9: return f"${x/1e9:.2f}B"
+        if x >= 1e6: return f"${x/1e6:.2f}M"
+        if x >= 1e3: return f"${x/1e3:.2f}K"
+        return f"${x:,.0f}"
+    except Exception:
+        return "$0"
+
+# ------------------- Core Scan -------------------
 def run_scan():
     if not buy_exchanges or not sell_exchanges:
         st.warning("Please select at least one Buy and one Sell exchange.")
         return
 
     try:
-        exchanges = {}
-        for eid in set(buy_exchanges + sell_exchanges):
-            exchanges[eid] = getattr(ccxt, eid)({"enableRateLimit": True, "timeout": 5000})
-            exchanges[eid].load_markets()
+        # 1) instantiate & load markets
+        ex_objs = {}
+        for ex_id in set(buy_exchanges + sell_exchanges):
+            opts = {"enableRateLimit": True, "timeout": 7000}
+            if ex_id in EXTRA_OPTS:
+                opts.update(EXTRA_OPTS[ex_id])
+            ex = getattr(ccxt, ex_id)(opts)
+            ex.load_markets()
+            ex_objs[ex_id] = ex
+
+        # 2) bulk fetch tickers for each selected exchange (fast path)
+        bulk_tickers = {}
+        for ex_id, ex in ex_objs.items():
+            try:
+                bulk_tickers[ex_id] = ex.fetch_tickers()
+            except Exception as e:
+                st.warning(f"⚠️ {EXCHANGE_NAMES[ex_id]} fetch_tickers failed: {e}")
+                bulk_tickers[ex_id] = {}
 
         results = []
-        for bex in buy_exchanges:
-            for sex in sell_exchanges:
-                if bex == sex: continue
-                ex1, ex2 = exchanges[bex], exchanges[sex]
 
-                common_markets = list(set(ex1.markets.keys()) & set(ex2.markets.keys()))[:200]
+        # 3) compare market prices across exchange pairs on their *common* symbols
+        for buy_id in buy_exchanges:
+            for sell_id in sell_exchanges:
+                if buy_id == sell_id:
+                    continue
+                buy_ex, sell_ex = ex_objs[buy_id], ex_objs[sell_id]
+                buy_tk, sell_tk = bulk_tickers[buy_id], bulk_tickers[sell_id]
 
-                for m in common_markets:
-                    try:
-                        t1, t2 = ex1.fetch_ticker(m), ex2.fetch_ticker(m)
-                    except Exception:
+                common = set(buy_ex.markets.keys()) & set(sell_ex.markets.keys())
+                # optional: keep it snappy
+                # common = list(common)[:300]
+
+                for sym in common:
+                    bt = buy_tk.get(sym)  # buy exchange ticker for this symbol
+                    st_ = sell_tk.get(sym)  # sell exchange ticker for this symbol
+                    buy_px = market_price_from_ticker(bt)
+                    sell_px = market_price_from_ticker(st_)
+                    if not buy_px or not sell_px:
+                        continue  # skip if either side missing a sensible price
+
+                    # fees (taker as conservative default)
+                    buy_fee = buy_ex.markets.get(sym, {}).get("taker", 0.001) or 0.001
+                    sell_fee = sell_ex.markets.get(sym, {}).get("taker", 0.001) or 0.001
+
+                    # spread & profit (CMC-style)
+                    spread = (sell_px - buy_px) / buy_px * 100.0
+                    profit_after = spread - (buy_fee * 100.0 + sell_fee * 100.0)
+
+                    if profit_after < min_profit or profit_after > max_profit:
                         continue
 
-                    ask1, bid1 = t1.get("ask"), t1.get("bid")
-                    ask2, bid2 = t2.get("ask"), t2.get("bid")
-                    if not ask1 or not bid1 or not ask2 or not bid2: continue
+                    # 24h volumes (USD-ish)
+                    buy_vol_usd = safe_usd_volume(sym, bt or {}, buy_tk)
+                    sell_vol_usd = safe_usd_volume(sym, st_ or {}, sell_tk)
 
-                    f1, f2 = ex1.markets[m].get("taker", 0.001), ex2.markets[m].get("taker", 0.001)
-                    vol1, vol2 = t1.get("baseVolume", 0) * t1.get("last", 0), t2.get("baseVolume", 0) * t2.get("last", 0)
+                    # transferability & chain
+                    base, _quote = sym.split("/")
+                    chain, w_ok, d_ok = choose_common_chain(buy_ex, sell_ex, base)
 
-                    profit_raw = (bid2 / ask1 - 1) * 100
-                    profit_after = profit_raw - (f1*100 + f2*100)
-                    spread = round(profit_raw, 3)
+                    key = f"{sym}|{buy_id}>{sell_id}"
+                    stability = estimate_stability(key, profit_after)
 
-                    if min_profit <= profit_after <= max_profit:
-                        base, _ = m.split("/")
-                        chain, withdraw_ok, deposit_ok = check_transferability(ex1, ex2, base)
-                        stability = estimate_stability(f"{m}-{ex1.id}-{ex2.id}", profit_after)
-                        results.append({
-                            "Pair": m,
-                            "Buy@": EXCHANGE_NAMES[bex],
-                            "Buy Price": ask1,
-                            "Sell@": EXCHANGE_NAMES[sex],
-                            "Sell Price": bid2,
-                            "Spread %": spread,
-                            "Profit % After Fees": round(profit_after, 3),
-                            "Buy Vol (24h)": format_usd(vol1),
-                            "Sell Vol (24h)": format_usd(vol2),
-                            "Withdraw?": withdraw_ok,
-                            "Deposit?": deposit_ok,
-                            "Blockchain": chain,
-                            "Stability": stability
-                        })
+                    results.append({
+                        "Pair": sym,
+                        "Buy@": EXCHANGE_NAMES[buy_id],
+                        "Buy Price": round(float(buy_px), 8),
+                        "Sell@": EXCHANGE_NAMES[sell_id],
+                        "Sell Price": round(float(sell_px), 8),
+                        "Spread %": round(spread, 3),
+                        "Profit % After Fees": round(profit_after, 3),
+                        "Buy Vol (24h)": fmt_usd(buy_vol_usd),
+                        "Sell Vol (24h)": fmt_usd(sell_vol_usd),
+                        "Withdraw?": w_ok,
+                        "Deposit?": d_ok,
+                        "Blockchain": chain,
+                        "Stability": stability,
+                    })
 
         if results:
             df = pd.DataFrame(results).sort_values("Profit % After Fees", ascending=False)
-            st.subheader("Profitable Arbitrage Opportunities")
+            st.subheader("✅ Profitable Opportunities (Market Price)")
             st.dataframe(df, use_container_width=True)
-            st.download_button("⬇️ Download CSV", df.to_csv(index=False), "arbitrage_opportunities.csv", "text/csv")
+            st.download_button("⬇️ Download CSV", df.to_csv(index=False), "arbitrage_opportunities_market_price.csv", "text/csv")
         else:
-            st.info("No profitable opportunities in range.")
+            st.info("No opportunities in the selected profit range right now.")
 
     except Exception as e:
         st.error(f"Error: {e}")
 
-# ------------------- Run -------------------
+# ------------------- Trigger -------------------
 if scan_now or auto_refresh:
-    with st.spinner("🔍 Scanning exchanges, please wait..."):
+    with st.spinner("🔍 Scanning exchanges (market prices)…"):
         run_scan()
     if auto_refresh:
-        countdown = st.empty()
+        holder = st.empty()
         for i in range(20, 0, -1):
-            countdown.write(f"⏳ Refreshing in {i} seconds...")
+            holder.write(f"⏳ Refreshing in {i}s…")
             time.sleep(1)
         st.experimental_rerun()
