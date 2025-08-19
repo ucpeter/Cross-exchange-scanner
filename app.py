@@ -1,92 +1,169 @@
-import time
-import re
-import ccxt
+import time, re, ccxt, json, os
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Cross-Exchange Arbitrage — Market Price", layout="wide")
-st.title("🌍 Cross-Exchange Arbitrage Scanner — Market Price (CMC-style)")
+# ------------------- Page Config -------------------
+st.set_page_config(page_title="Cross-Exchange Arbitrage Scanner", layout="wide")
 
-# ------------------- Exchange lists & options -------------------
+# ------------------- Custom Dark Theme -------------------
+st.markdown("""
+    <style>
+    body, .stApp { background-color: #111111; color: #E0E0E0; }
+    .stSidebar { background-color: #1A1A1A !important; }
+    .stDataFrame th { background-color: #222 !important; color: #EEE !important; font-weight: 600; }
+    .stDataFrame td { color: #EEE !important; }
+    .stDataFrame tbody tr:nth-child(even) { background-color: #1E1E1E !important; }
+    .stDataFrame tbody tr:hover { background-color: #2A2A2A !important; }
+    .good { color: #4CAF50; font-weight: 600; }
+    .bad { color: #FF5252; font-weight: 600; }
+    .spread { color: #42A5F5; font-weight: 600; }
+    .stButton>button {
+        background-color: #1976D2; color: white; border-radius: 8px;
+        padding: 0.6em 1.2em; font-size: 16px; font-weight: 600;
+        border: none; cursor: pointer;
+        transition: background-color 0.3s ease;
+    }
+    .stButton>button:hover { background-color: #1565C0; }
+    </style>
+""", unsafe_allow_html=True)
+
+st.title("🌍 Cross-Exchange Arbitrage Scanner")
+
+# ------------------- Settings Persistence -------------------
+SETTINGS_FILE = "settings.json"
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_settings(settings):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f)
+
+saved = load_settings()
+
+# ------------------- Exchange List -------------------
 TOP_20_CCXT_EXCHANGES = [
     "binance", "okx", "coinbase", "kraken", "bybit", "kucoin",
-    "mexc", "bitfinex", "bitget", "gateio", "htx", "crypto_com",
-    "upbit", "bitmart", "whitebit", "poloniex", "bingx", "lbank",
-    "bitstamp", "gemini",
+    "mexc", "bitfinex", "bitget", "gateio", "crypto_com",
+    "upbit", "whitebit", "poloniex", "bingx", "lbank",
+    "bitstamp", "gemini", "bitrue", "xt",
 ]
 
 EXCHANGE_NAMES = {
     "binance": "Binance", "okx": "OKX", "coinbase": "Coinbase",
     "kraken": "Kraken", "bybit": "Bybit", "kucoin": "KuCoin",
     "mexc": "MEXC", "bitfinex": "Bitfinex", "bitget": "Bitget",
-    "gateio": "Gate.io", "htx": "HTX (Huobi)", "crypto_com": "Crypto.com",
-    "upbit": "Upbit", "bitmart": "Bitmart", "whitebit": "WhiteBIT",
-    "poloniex": "Poloniex", "bingx": "BingX", "lbank": "LBank",
-    "bitstamp": "Bitstamp", "gemini": "Gemini",
+    "gateio": "Gate.io", "crypto_com": "Crypto.com", "upbit": "Upbit",
+    "whitebit": "WhiteBIT", "poloniex": "Poloniex", "bingx": "BingX",
+    "lbank": "LBank", "bitstamp": "Bitstamp", "gemini": "Gemini",
+    "bitrue": "Bitrue", "xt": "XT",
 }
 
-# Force spot endpoints everywhere we can
 EXTRA_OPTS = {
-    "bitmart": {"options": {"defaultType": "spot", "defaultSubType": "linear"}},  # try to dodge futures v1
     "bybit": {"options": {"defaultType": "spot"}},
     "okx": {"options": {"defaultType": "spot"}},
     "bingx": {"options": {"defaultType": "spot"}},
     "mexc": {"options": {"defaultType": "spot"}},
+    "bitrue": {"options": {"defaultType": "spot"}},
+    "xt": {"options": {"defaultType": "spot"}},
 }
 
 USD_QUOTES = {"USDT", "USD", "USDC", "BUSD"}
 
-# Low-fee networks preferred for transfers (order matters)
 LOW_FEE_CHAIN_PRIORITY = ["TRC20", "BEP20", "BSC", "SOL", "MATIC", "ARB", "OP", "Polygon", "TON", "AVAX", "ETH"]
 
-# Regex/keywords to drop leveraged tokens & ETPs even if they’re “spot”
-LEV_PATTERNS = [
-    r"\b\d+[LS]\b",     # 3L, 5S, etc
-    r"\bUP\b", r"\bDOWN\b",
-    r"\bBULL\b", r"\bBEAR\b",
-    r"\b3L\b", r"\b3S\b", r"\b5L\b", r"\b5S\b",
-]
+LEV_PATTERNS = [r"\b\d+[LS]\b", r"\bUP\b", r"\bDOWN\b", r"\bBULL\b", r"\bBEAR\b"]
 LEV_REGEX = re.compile("|".join(LEV_PATTERNS), re.IGNORECASE)
 
-# ------------------- Sidebar Controls -------------------
+# ------------------- Sidebar -------------------
 st.sidebar.header("Scanner Controls")
 
 buy_exchanges = st.sidebar.multiselect(
     "Buy Exchanges (up to 5)",
-    TOP_20_CCXT_EXCHANGES, max_selections=5,
+    TOP_20_CCXT_EXCHANGES,
+    default=saved.get("buy_exchanges", []),
+    max_selections=5,
     format_func=lambda x: EXCHANGE_NAMES[x],
 )
 
 sell_exchanges = st.sidebar.multiselect(
     "Sell Exchanges (up to 5)",
-    TOP_20_CCXT_EXCHANGES, max_selections=5,
+    TOP_20_CCXT_EXCHANGES,
+    default=saved.get("sell_exchanges", []),
+    max_selections=5,
     format_func=lambda x: EXCHANGE_NAMES[x],
 )
 
-min_profit = st.sidebar.number_input("Minimum Profit % (after fees)", 0.0, 100.0, 1.0, 0.1)
-max_profit = st.sidebar.number_input("Maximum Profit % (after fees)", 0.0, 200.0, 20.0, 0.1)
-
-min_24h_vol_usd = st.sidebar.number_input("Min 24h Volume (USD) per side", 0.0, 1_000_000_000.0, 100_000.0, 50_000.0)
-
-st.sidebar.markdown("---")
-exclude_chains = st.sidebar.multiselect(
-    "Exclude Blockchains (skip these networks)",
-    ["ETH", "TRC20", "BEP20", "BSC", "SOL", "MATIC", "ARB", "OP", "Polygon", "TON", "AVAX"],
-    default=["ETH"],  # default: skip expensive ERC20
+min_profit = st.sidebar.number_input(
+    "Minimum Profit % (after fees)", 0.0, 100.0,
+    saved.get("min_profit", 1.0), 0.1
 )
-include_all_chains = st.sidebar.checkbox("Include all blockchains (ignore exclusion)", value=False)
 
-st.sidebar.markdown("---")
-auto_refresh = st.sidebar.checkbox("🔄 Auto Refresh Every 20s", value=False)
+max_profit = st.sidebar.number_input(
+    "Maximum Profit % (after fees)", 0.0, 200.0,
+    saved.get("max_profit", 20.0), 0.1
+)
+
+min_24h_vol_usd = st.sidebar.number_input(
+    "Min 24h Volume (USD)", 0.0, 1_000_000_000.0,
+    saved.get("min_24h_vol_usd", 100000.0), 50000.0
+)
+
+exclude_chains = st.sidebar.multiselect(
+    "Exclude Blockchains",
+    ["ETH", "TRC20", "BEP20", "BSC", "SOL", "MATIC", "ARB", "OP", "Polygon", "TON", "AVAX"],
+    default=saved.get("exclude_chains", ["ETH"])
+)
+include_all_chains = st.sidebar.checkbox(
+    "Include all blockchains (ignore exclusion)",
+    value=saved.get("include_all_chains", False)
+)
+
+auto_refresh = st.sidebar.checkbox("🔄 Auto Refresh Every 20s", value=saved.get("auto_refresh", False))
 scan_now = st.button("🚀 Scan Now")
 
-st.caption(
-    "Prices use *last* (or mid of bid/ask). Only **spot** pairs with **USDT/USD/USDC/BUSD** are compared. "
-    "We also skip leveraged tokens (3L/3S, UP/DOWN, BULL/BEAR). "
-    "Both sides must meet **Min 24h Vol (USD)** and **WD/DP must be enabled** on the chosen chain."
-)
+# ------------------- Save settings only when Scan Now clicked -------------------
+if scan_now:
+    save_settings({
+        "buy_exchanges": buy_exchanges,
+        "sell_exchanges": sell_exchanges,
+        "min_profit": min_profit,
+        "max_profit": max_profit,
+        "min_24h_vol_usd": min_24h_vol_usd,
+        "exclude_chains": exclude_chains,
+        "include_all_chains": include_all_chains,
+        "auto_refresh": auto_refresh,
+    })
+    
+# Extra CSS for pill badges and compact table
+st.markdown("""
+    <style>
+    .pill { padding: 2px 10px; border-radius: 999px; font-weight: 700; font-size: 12px; }
+    .pill-green { background: #1B5E20; color: #E8F5E9; border: 1px solid #2E7D32; }
+    .pill-red { background: #7F1D1D; color: #FEE2E2; border: 1px solid #991B1B; }
+    .pill-blue { background: #0D47A1; color: #E3F2FD; border: 1px solid #1565C0; }
+    .table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #2A2A2A; }
+    table.arb-table { width: 100%; border-collapse: collapse; }
+    table.arb-table th, table.arb-table td { padding: 8px 10px; border-bottom: 1px solid #222; }
+    table.arb-table th { background: #1D1D1D; text-align: left; }
+    table.arb-table tr:nth-child(even) { background: #161616; }
+    table.arb-table tr:hover { background: #202020; }
+    .num { text-align: right; white-space: nowrap; }
+    .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .good { color: #4CAF50; font-weight: 700; }
+    .bad { color: #FF5252; font-weight: 700; }
+    .spread { color: #42A5F5; font-weight: 700; }
+    .small { color: #BDBDBD; font-size: 12px; }
+    </style>
+""", unsafe_allow_html=True)
 
-# ------------------- Session State -------------------
+# ---------- Runtime state for opportunity lifetime tracking ----------
 if "op_cache" not in st.session_state:
     st.session_state.op_cache = {}  # key -> [(timestamp, profit%), ...]
 if "lifetime_history" not in st.session_state:
@@ -94,7 +171,11 @@ if "lifetime_history" not in st.session_state:
 if "last_seen_keys" not in st.session_state:
     st.session_state.last_seen_keys = set()
 
-# ------------------- Helpers -------------------
+# ---------- Helpers ----------
+USD_QUOTES = {"USDT", "USD", "USDC", "BUSD"}
+LOW_FEE_CHAIN_PRIORITY = ["TRC20", "BEP20", "BSC", "SOL", "MATIC", "ARB", "OP", "Polygon", "TON", "AVAX", "ETH"]
+LEV_REGEX = re.compile(r"\b(\d+[LS]|UP|DOWN|BULL|BEAR)\b", re.IGNORECASE)
+
 def parse_symbol(symbol: str):
     base, quote = symbol.split("/")[0], symbol.split("/")[1].split(":")[0]
     return base, quote
@@ -106,13 +187,13 @@ def market_price_from_ticker(t):
     if last is not None:
         try:
             return float(last)
-        except Exception:
+        except:
             pass
     bid, ask = t.get("bid"), t.get("ask")
     if bid is not None and ask is not None:
         try:
             return (float(bid) + float(ask)) / 2.0
-        except Exception:
+        except:
             return None
     return None
 
@@ -128,114 +209,13 @@ def fmt_usd(x):
         x = float(x or 0)
         if x >= 1e9: return f"${x/1e9:.2f}B"
         if x >= 1e6: return f"${x/1e6:.2f}M"
-        if x >= 1e3: return f"${x/1e3:.2f}K"
+        if x >= 1e3: return f"${x/1e3:.0f}K"
         return f"${x:,.0f}"
-    except Exception:
+    except:
         return "$0"
 
-def choose_common_chain(ex1, ex2, coin):
-    try:
-        c1 = ex1.currencies.get(coin, {}) or {}
-        c2 = ex2.currencies.get(coin, {}) or {}
-        nets1 = c1.get("networks", {}) or {}
-        nets2 = c2.get("networks", {}) or {}
-        common = set(nets1.keys()) & set(nets2.keys())
-        if not common:
-            return "❌ No chain", "❌", "❌"
-        # honor user exclusions unless "include all"
-        preferred_list = LOW_FEE_CHAIN_PRIORITY[:]
-        if include_all_chains is False and exclude_chains:
-            preferred_list = [n for n in preferred_list if n not in exclude_chains]
-        # pick best common
-        best = None
-        for pref in preferred_list:
-            if pref in common:
-                best = pref; break
-        if not best:
-            # if no preferred common, pick lexicographically
-            best = sorted(list(common))[0]
-            # if excluded and not forced to include-all, reject entirely
-            if include_all_chains is False and best in exclude_chains:
-                return "❌ No chain", "❌", "❌"
-        w_ok = "✅" if nets1.get(best, {}).get("withdraw") else "❌"
-        d_ok = "✅" if nets2.get(best, {}).get("deposit") else "❌"
-        return best, w_ok, d_ok
-    except Exception:
-        return "❌ Unknown", "❌", "❌"
-
-INFO_VOLUME_CANDIDATES = [
-    "quoteVolume", "baseVolume", "vol", "vol24h", "volCcy24h", "volValue",
-    "turnover", "turnover24h", "quoteVolume24h", "amount", "value",
-    "acc_trade_price_24h", "quote_volume_24h", "base_volume_24h",
-]
-
-def safe_usd_volume(ex_id, symbol, ticker, price, all_tickers):
-    try:
-        base, quote = parse_symbol(symbol)
-        q_upper = quote.upper()
-        qvol = ticker.get("quoteVolume")
-        bvol = ticker.get("baseVolume")
-
-        if q_upper in USD_QUOTES and qvol:
-            return float(qvol)
-
-        if bvol and price:
-            return float(bvol) * float(price)
-
-        info = ticker.get("info") or {}
-        raw = None
-        for key in INFO_VOLUME_CANDIDATES:
-            val = info.get(key)
-            if val is None:
-                continue
-            try:
-                fval = float(val)
-                if fval > 0:
-                    raw = fval
-                    break
-            except Exception:
-                continue
-
-        if raw is not None:
-            if q_upper in USD_QUOTES:
-                return float(raw)
-            conv_sym = f"{q_upper}/USDT"
-            conv_t = all_tickers.get(conv_sym)
-            conv_px = market_price_from_ticker(conv_t)
-            if conv_px:
-                return float(raw) * float(conv_px)
-
-        if qvol:
-            conv_sym = f"{q_upper}/USDT"
-            conv_t = all_tickers.get(conv_sym)
-            conv_px = market_price_from_ticker(conv_t)
-            if conv_px:
-                return float(qvol) * float(conv_px)
-
-        return 0.0
-    except Exception:
-        return 0.0
-
-def symbol_ok(ex_obj, symbol):
-    m = ex_obj.markets.get(symbol, {})
-    if not m:
-        return False
-    # hard spot only
-    if not m.get("spot", True):
-        return False
-    # USD quotes only
-    base, quote = parse_symbol(symbol)
-    if quote.upper() not in USD_QUOTES:
-        return False
-    # exclude leveraged/ETP names
-    if LEV_REGEX.search(symbol):
-        return False
-    return True
-
 def secs_to_label(secs):
-    if secs < 90:
-        return f"{int(secs)}s"
-    return f"{secs/60:.1f}m"
+    return f"{int(secs)}s" if secs < 90 else f"{secs/60:.1f}m"
 
 def update_lifetime_for_disappeared(current_keys):
     gone = st.session_state.last_seen_keys - set(current_keys)
@@ -253,11 +233,9 @@ def stability_and_expiry(key, current_profit):
     if not trail:
         st.session_state.op_cache[key] = [(now, current_profit)]
         return "⏳ new", "~unknown"
-
     trail.append((now, current_profit))
-    st.session_state.op_cache[key] = trail[-30:]
+    st.session_state.op_cache[key] = trail[-30:]  # last ~10 min if 20s cadence
     duration = trail[-1][0] - trail[0][0]
-
     observed = f"⏳ {secs_to_label(duration)} observed"
     hist = st.session_state.lifetime_history.get(key, [])
     if not hist:
@@ -267,7 +245,101 @@ def stability_and_expiry(key, current_profit):
         remaining = avg_life - duration
         expiry = "⚠️ past avg" if remaining <= 0 else f"~{secs_to_label(remaining)} left"
     return observed, expiry
-# ------------------- Core Scan -------------------
+
+INFO_VOLUME_CANDIDATES = [
+    "quoteVolume", "baseVolume", "vol", "vol24h", "volCcy24h", "volValue",
+    "turnover", "turnover24h", "quoteVolume24h", "amount", "value",
+    "acc_trade_price_24h", "quote_volume_24h", "base_volume_24h",
+]
+
+def safe_usd_volume(ex_id, symbol, ticker, price, all_tickers):
+    try:
+        base, quote = parse_symbol(symbol)
+        q_upper = quote.upper()
+        qvol = ticker.get("quoteVolume")
+        bvol = ticker.get("baseVolume")
+        if q_upper in USD_QUOTES and qvol:
+            return float(qvol)
+        if bvol and price:
+            return float(bvol) * float(price)
+        info = ticker.get("info") or {}
+        raw = None
+        for key in INFO_VOLUME_CANDIDATES:
+            val = info.get(key)
+            if val is None:
+                continue
+            try:
+                fval = float(val)
+                if fval > 0:
+                    raw = fval
+                    break
+            except:
+                continue
+        if raw is not None:
+            if q_upper in USD_QUOTES:
+                return float(raw)
+            conv_sym = f"{q_upper}/USDT"
+            conv_t = all_tickers.get(conv_sym)
+            conv_px = market_price_from_ticker(conv_t)
+            if conv_px:
+                return float(raw) * float(conv_px)
+        if qvol:
+            conv_sym = f"{q_upper}/USDT"
+            conv_t = all_tickers.get(conv_sym)
+            conv_px = market_price_from_ticker(conv_t)
+            if conv_px:
+                return float(qvol) * float(conv_px)
+        return 0.0
+    except:
+        return 0.0
+
+def symbol_ok(ex_obj, symbol):
+    m = ex_obj.markets.get(symbol, {})
+    if not m:
+        return False
+    # Spot only
+    if not m.get("spot", True):
+        return False
+    # USD-standardized quotes only
+    base, quote = parse_symbol(symbol)
+    if quote.upper() not in USD_QUOTES:
+        return False
+    # Exclude leveraged/ETP tokens
+    if LEV_REGEX.search(symbol):
+        return False
+    # Active markets only (if provided)
+    if m.get("active") is False:
+        return False
+    return True
+
+def choose_common_chain(ex1, ex2, coin, exclude_chains, include_all_chains):
+    try:
+        c1 = ex1.currencies.get(coin, {}) or {}
+        c2 = ex2.currencies.get(coin, {}) or {}
+        nets1 = c1.get("networks", {}) or {}
+        nets2 = c2.get("networks", {}) or {}
+        common = set(nets1.keys()) & set(nets2.keys())
+        if not common:
+            return "❌ No chain", "❌", "❌"
+        # Build preferred list honoring exclusions
+        preferred = [n for n in LOW_FEE_CHAIN_PRIORITY if (include_all_chains or n not in exclude_chains)]
+        best = None
+        for pref in preferred:
+            if pref in common:
+                best = pref; break
+        if not best:
+            # fallback: first common, but reject if excluded and not include_all
+            candidate = sorted(list(common))[0]
+            if not include_all_chains and candidate in exclude_chains:
+                return "❌ No chain", "❌", "❌"
+            best = candidate
+        w_ok = "✅" if nets1.get(best, {}).get("withdraw") else "❌"
+        d_ok = "✅" if nets2.get(best, {}).get("deposit") else "❌"
+        return best, w_ok, d_ok
+    except:
+        return "❌ Unknown", "❌", "❌"
+
+# ---------- Core Scan ----------
 def run_scan():
     if not buy_exchanges or not sell_exchanges:
         st.warning("Please select at least one Buy and one Sell exchange.")
@@ -277,9 +349,8 @@ def run_scan():
         # 1) init exchanges & load spot markets
         ex_objs = {}
         for ex_id in set(buy_exchanges + sell_exchanges):
-            opts = {"enableRateLimit": True, "timeout": 10000}
-            if ex_id in EXTRA_OPTS:
-                opts.update(EXTRA_OPTS[ex_id])
+            opts = {"enableRateLimit": True, "timeout": 12000}
+            opts.update(EXTRA_OPTS.get(ex_id, {}))
             ex = getattr(ccxt, ex_id)(opts)
             ex.load_markets()
             ex_objs[ex_id] = ex
@@ -290,7 +361,7 @@ def run_scan():
             try:
                 bulk_tickers[ex_id] = ex.fetch_tickers()
             except Exception as e:
-                st.warning(f"⚠️ {EXCHANGE_NAMES[ex_id]} fetch_tickers failed: {e}")
+                st.warning(f"⚠️ {EXCHANGE_NAMES.get(ex_id, ex_id)} fetch_tickers failed: {e}")
                 bulk_tickers[ex_id] = {}
 
         results = []
@@ -306,7 +377,7 @@ def run_scan():
 
                 common = set(buy_ex.markets.keys()) & set(sell_ex.markets.keys())
                 symbols = [s for s in common if symbol_ok(buy_ex, s) and symbol_ok(sell_ex, s)]
-                symbols = symbols[:700]  # keep snappy even with 5x5 combos
+                symbols = symbols[:700]  # keep snappy
 
                 for sym in symbols:
                     bt, st_ = buy_tk.get(sym), sell_tk.get(sym)
@@ -320,7 +391,7 @@ def run_scan():
                     if not buy_px or not sell_px:
                         continue
 
-                    # sanity guard: throw out absurd/stale outliers
+                    # sanity guard: throw out absurd outliers
                     gap = abs(sell_px - buy_px) / buy_px
                     if gap > 0.5:
                         continue
@@ -340,10 +411,12 @@ def run_scan():
                         continue
 
                     base, quote = parse_symbol(sym)
-                    chain, w_ok, d_ok = choose_common_chain(buy_ex, sell_ex, base)
+                    chain, w_ok, d_ok = choose_common_chain(
+                        buy_ex, sell_ex, base, exclude_chains, include_all_chains
+                    )
 
                     # Respect chain exclusions (unless include_all_chains)
-                    if include_all_chains is False and chain in exclude_chains:
+                    if not include_all_chains and (chain in exclude_chains or chain.startswith("❌")):
                         continue
 
                     # Require WD/DP enabled
@@ -355,11 +428,12 @@ def run_scan():
                     observed, expiry = stability_and_expiry(key, profit_after)
 
                     results.append({
+                        "#": None,  # we'll fill later
                         "Pair": sym,
                         "Quote": quote,
-                        "Buy@": EXCHANGE_NAMES[buy_id],
+                        "Buy@": EXCHANGE_NAMES.get(buy_id, buy_id),
                         "Buy Price": round(float(buy_px), 10),
-                        "Sell@": EXCHANGE_NAMES[sell_id],
+                        "Sell@": EXCHANGE_NAMES.get(sell_id, sell_id),
                         "Sell Price": round(float(sell_px), 10),
                         "Spread %": round(spread, 4),
                         "Profit % After Fees": round(profit_after, 4),
@@ -375,17 +449,63 @@ def run_scan():
         # 4) record lifetimes for disappeared ops, then update last_seen
         update_lifetime_for_disappeared(current_keys)
 
-        # 5) display
+        # 5) display (styled)
         if results:
             df = pd.DataFrame(results).sort_values(
                 ["Profit % After Fees", "Spread %"], ascending=False
             ).reset_index(drop=True)
-            df.insert(0, "#", range(1, len(df) + 1))  # clean numbering
-            st.subheader("✅ Profitable Opportunities (Market Price, USD-standardized)")
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            df["#"] = range(1, len(df) + 1)
+
+            # Build styled HTML table
+            def pill(val, ok=True):
+                return f'<span class="pill {"pill-green" if ok else "pill-red"}">{val}</span>'
+
+            def color_profit(p):
+                return f'<span class="good mono">{p:.4f}%</span>' if p >= 0 else f'<span class="bad mono">{p:.4f}%</span>'
+
+            def color_spread(s):
+                return f'<span class="spread mono">{s:.4f}%</span>'
+
+            # Build rows
+            headers = ["#", "Pair", "Quote", "Buy@", "Buy Price", "Sell@", "Sell Price",
+                       "Spread %", "Profit % After Fees", "Buy Vol (24h)", "Sell Vol (24h)",
+                       "Withdraw?", "Deposit?", "Blockchain", "Stability", "Est. Expiry"]
+
+            html = '<div class="table-wrap"><table class="arb-table"><thead><tr>'
+            for h in headers:
+                html += f"<th>{h}</th>"
+            html += "</tr></thead><tbody>"
+
+            for _, r in df.iterrows():
+                html += "<tr>"
+                html += f'<td class="num mono">{int(r["#"])}</td>'
+                html += f'<td class="mono">{r["Pair"]}</td>'
+                html += f'<td>{r["Quote"]}</td>'
+                html += f'<td>{r["Buy@"]}</td>'
+                html += f'<td class="num mono">{r["Buy Price"]}</td>'
+                html += f'<td>{r["Sell@"]}</td>'
+                html += f'<td class="num mono">{r["Sell Price"]}</td>'
+                html += f'<td class="num">{color_spread(r["Spread %"])}</td>'
+                html += f'<td class="num">{color_profit(r["Profit % After Fees"])}</td>'
+                html += f'<td class="num mono">{r["Buy Vol (24h)"]}</td>'
+                html += f'<td class="num mono">{r["Sell Vol (24h)"]}</td>'
+                html += f'<td>{pill("✅", True) if r["Withdraw?"]=="✅" else pill("❌", False)}</td>'
+                html += f'<td>{pill("✅", True) if r["Deposit?"]=="✅" else pill("❌", False)}</td>'
+                html += f'<td><span class="pill pill-blue">{r["Blockchain"]}</span></td>'
+                html += f'<td class="small">{r["Stability"]}</td>'
+                html += f'<td class="small">{r["Est. Expiry"]}</td>'
+                html += "</tr>"
+
+            html += "</tbody></table></div>"
+
+            st.subheader("✅ Profitable Arbitrage Opportunities")
+            st.markdown(html, unsafe_allow_html=True)
+
+            # Also provide CSV download
+            csv_df = df.copy()
             st.download_button(
                 "⬇️ Download CSV",
-                df.to_csv(index=False),
+                csv_df.to_csv(index=False),
                 "arbitrage_opportunities.csv",
                 "text/csv",
             )
@@ -395,7 +515,7 @@ def run_scan():
     except Exception as e:
         st.error(f"Error: {e}")
 
-# ------------------- Trigger -------------------
+# ---------- Trigger ----------
 if scan_now or auto_refresh:
     with st.spinner("🔍 Scanning exchanges…"):
         run_scan()
