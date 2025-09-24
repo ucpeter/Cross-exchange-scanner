@@ -1,4 +1,3 @@
-# full_scanner_patched.py
 import time, re, ccxt, json, os
 import pandas as pd
 import streamlit as st
@@ -141,156 +140,63 @@ if scan_now:
         "include_all_chains": include_all_chains,
         "auto_refresh": auto_refresh,
     })
+    
+# Extra CSS for pill badges and compact table
+st.markdown("""
+    <style>
+    .pill { padding: 2px 10px; border-radius: 999px; font-weight: 700; font-size: 12px; }
+    .pill-green { background: #1B5E20; color: #E8F5E9; border: 1px solid #2E7D32; }
+    .pill-red { background: #7F1D1D; color: #FEE2E2; border: 1px solid #991B1B; }
+    .pill-blue { background: #0D47A1; color: #E3F2FD; border: 1px solid #1565C0; }
+    .table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #2A2A2A; }
+    table.arb-table { width: 100%; border-collapse: collapse; }
+    table.arb-table th, table.arb-table td { padding: 8px 10px; border-bottom: 1px solid #222; }
+    table.arb-table th { background: #1D1D1D; text-align: left; }
+    table.arb-table tr:nth-child(even) { background: #161616; }
+    table.arb-table tr:hover { background: #202020; }
+    .num { text-align: right; white-space: nowrap; }
+    .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .good { color: #4CAF50; font-weight: 700; }
+    .bad { color: #FF5252; font-weight: 700; }
+    .spread { color: #42A5F5; font-weight: 700; }
+    .small { color: #BDBDBD; font-size: 12px; }
+    </style>
+""", unsafe_allow_html=True)
 
-# ---------- Runtime state ----------
+# ---------- Runtime state for opportunity lifetime tracking ----------
 if "op_cache" not in st.session_state:
-    st.session_state.op_cache = {}
+    st.session_state.op_cache = {}  # key -> [(timestamp, profit%), ...]
 if "lifetime_history" not in st.session_state:
-    st.session_state.lifetime_history = {}
+    st.session_state.lifetime_history = {}  # key -> [durations (sec)]
 if "last_seen_keys" not in st.session_state:
     st.session_state.last_seen_keys = set()
 
-# ---------- Helpers (PATCHED ONLY) ----------
+# ---------- Helpers ----------
+USD_QUOTES = {"USDT", "USD", "USDC", "BUSD"}
+LOW_FEE_CHAIN_PRIORITY = ["TRC20", "BEP20", "BSC", "SOL", "MATIC", "ARB", "OP", "Polygon", "TON", "AVAX", "ETH"]
+LEV_REGEX = re.compile(r"\b(\d+[LS]|UP|DOWN|BULL|BEAR)\b", re.IGNORECASE)
+
 def parse_symbol(symbol: str):
-    # keep original behavior (don't change signature/return shape)
     base, quote = symbol.split("/")[0], symbol.split("/")[1].split(":")[0]
     return base, quote
 
 def market_price_from_ticker(t):
-    """
-    Robust extraction of a 'market price' from ccxt ticker dict.
-    Prefer 'last' (last trade), then common fallback fields, then 'info' keys,
-    finally fall back to mid of bid/ask if available. Returns float or None.
-    """
     if not t:
         return None
-
-    # 1) prefer standardized 'last'
-    for k in ("last", "close", "price", "lastPrice", "tradePrice", "last_traded", "lastTradePrice", "lastPrice24h"):
-        # check top-level
-        val = t.get(k)
-        if val is None:
-            # check inside info dict (different exchanges put it here)
-            info = t.get("info") or {}
-            val = info.get(k)
-        if val is not None:
-            try:
-                return float(val)
-            except:
-                # sometimes it's nested or stringy; try coerced float
-                try:
-                    return float(str(val))
-                except:
-                    pass
-
-    # 2) try average/vwap/weighted fields
-    for k in ("average", "vwap", "weightedAverage", "avgPrice"):
-        val = t.get(k) or (t.get("info") or {}).get(k)
-        if val is not None:
-            try:
-                return float(val)
-            except:
-                pass
-
-    # 3) last resort: use bid/ask mid if both present (still preferable to returning None)
+    last = t.get("last")
+    if last is not None:
+        try:
+            return float(last)
+        except:
+            pass
     bid, ask = t.get("bid"), t.get("ask")
     if bid is not None and ask is not None:
         try:
             return (float(bid) + float(ask)) / 2.0
         except:
-            pass
-
+            return None
     return None
 
-# extended list of candidate volume keys (search both ticker and ticker['info'])
-INFO_VOLUME_CANDIDATES = [
-    "quoteVolume", "quoteVolume24h", "quote_volume_24h", "quote_volume", "quoteVol24h", "quoteVol",
-    "baseVolume", "baseVolume24h", "base_volume_24h", "base_volume", "baseVol24h", "baseVol",
-    "vol", "vol24h", "volCcy24h", "volValue", "value", "amount", "turnover", "turnover24h",
-    "volume", "volumeUsd", "acc_trade_price_24h",
-    "q", "Q", "v", "volume24h", "quoteAmount"
-]
-
-def safe_usd_volume(ex_id, symbol, ticker, price, all_tickers):
-    """
-    Estimate 24h USD volume for (ex_id, symbol, ticker).
-    Tries:
-      - quoteVolume (already USD if quote is USD-like)
-      - baseVolume * price
-      - common info keys
-      - convert quote-volume using a available quote->USDT pair from all_tickers
-    Returns float USD amount or 0.0 on failure.
-    """
-    try:
-        base, quote = parse_symbol(symbol)
-        q_upper = quote.upper()
-
-        # standard ccxt fields
-        qvol = ticker.get("quoteVolume") or ticker.get("quoteVolume24h") or ticker.get("quote_volume")
-        bvol = ticker.get("baseVolume") or ticker.get("baseVolume24h") or ticker.get("base_volume")
-
-        # Case A: quote is already USD-like and quoteVolume present
-        if q_upper in USD_QUOTES and qvol:
-            try:
-                return float(qvol)
-            except:
-                pass
-
-        # Case B: baseVolume * price (when base volume provided)
-        if bvol and price:
-            try:
-                return float(bvol) * float(price)
-            except:
-                pass
-
-        # Case C: look inside info for many candidate keys
-        info = ticker.get("info") or {}
-        raw = None
-        for key in INFO_VOLUME_CANDIDATES:
-            # check ticker top-level then info
-            val = ticker.get(key)
-            if val is None:
-                val = info.get(key)
-            if val is None:
-                continue
-            try:
-                fval = float(val)
-                if fval > 0:
-                    raw = fval
-                    break
-            except:
-                continue
-
-        if raw is not None:
-            # if quote is USD-like then raw likely already in USD (quoteVolume-like)
-            if q_upper in USD_QUOTES:
-                return float(raw)
-            # else attempt to convert raw (quote-volume) to USD using available quote->USDT/USDC/BUSD/USD pairs
-            for conv_quote in ("USDT", "USDC", "BUSD", "USD"):
-                conv_sym = f"{q_upper}/{conv_quote}"
-                conv_t = all_tickers.get(conv_sym)
-                conv_px = market_price_from_ticker(conv_t)
-                if conv_px:
-                    return float(raw) * float(conv_px)
-
-        # Case D: if qvol exists but we couldn't confirm, try to convert qvol via a conv_sym
-        if qvol:
-            for conv_quote in ("USDT", "USDC", "BUSD", "USD"):
-                conv_sym = f"{q_upper}/{conv_quote}"
-                conv_t = all_tickers.get(conv_sym)
-                conv_px = market_price_from_ticker(conv_t)
-                if conv_px:
-                    try:
-                        return float(qvol) * float(conv_px)
-                    except:
-                        pass
-
-        # final fallback: give up and return 0.0
-        return 0.0
-    except Exception:
-        return 0.0
-
-# ---------- unchanged helpers ----------
 def is_ticker_fresh(t, max_age_sec=300):
     ts = t.get("timestamp")
     if ts is None:
@@ -308,18 +214,100 @@ def fmt_usd(x):
     except:
         return "$0"
 
-# ---------- original functions preserved below (unchanged) ----------
+def secs_to_label(secs):
+    return f"{int(secs)}s" if secs < 90 else f"{secs/60:.1f}m"
+
+def update_lifetime_for_disappeared(current_keys):
+    gone = st.session_state.last_seen_keys - set(current_keys)
+    for key in gone:
+        trail = st.session_state.op_cache.get(key, [])
+        if trail:
+            duration = trail[-1][0] - trail[0][0]
+            if duration > 0:
+                st.session_state.lifetime_history.setdefault(key, []).append(duration)
+    st.session_state.last_seen_keys = set(current_keys)
+
+def stability_and_expiry(key, current_profit):
+    now = time.time()
+    trail = st.session_state.op_cache.get(key, [])
+    if not trail:
+        st.session_state.op_cache[key] = [(now, current_profit)]
+        return "⏳ new", "~unknown"
+    trail.append((now, current_profit))
+    st.session_state.op_cache[key] = trail[-30:]  # last ~10 min if 20s cadence
+    duration = trail[-1][0] - trail[0][0]
+    observed = f"⏳ {secs_to_label(duration)} observed"
+    hist = st.session_state.lifetime_history.get(key, [])
+    if not hist:
+        expiry = "~unknown"
+    else:
+        avg_life = sum(hist) / len(hist)
+        remaining = avg_life - duration
+        expiry = "⚠️ past avg" if remaining <= 0 else f"~{secs_to_label(remaining)} left"
+    return observed, expiry
+
+INFO_VOLUME_CANDIDATES = [
+    "quoteVolume", "baseVolume", "vol", "vol24h", "volCcy24h", "volValue",
+    "turnover", "turnover24h", "quoteVolume24h", "amount", "value",
+    "acc_trade_price_24h", "quote_volume_24h", "base_volume_24h",
+]
+
+def safe_usd_volume(ex_id, symbol, ticker, price, all_tickers):
+    try:
+        base, quote = parse_symbol(symbol)
+        q_upper = quote.upper()
+        qvol = ticker.get("quoteVolume")
+        bvol = ticker.get("baseVolume")
+        if q_upper in USD_QUOTES and qvol:
+            return float(qvol)
+        if bvol and price:
+            return float(bvol) * float(price)
+        info = ticker.get("info") or {}
+        raw = None
+        for key in INFO_VOLUME_CANDIDATES:
+            val = info.get(key)
+            if val is None:
+                continue
+            try:
+                fval = float(val)
+                if fval > 0:
+                    raw = fval
+                    break
+            except:
+                continue
+        if raw is not None:
+            if q_upper in USD_QUOTES:
+                return float(raw)
+            conv_sym = f"{q_upper}/USDT"
+            conv_t = all_tickers.get(conv_sym)
+            conv_px = market_price_from_ticker(conv_t)
+            if conv_px:
+                return float(raw) * float(conv_px)
+        if qvol:
+            conv_sym = f"{q_upper}/USDT"
+            conv_t = all_tickers.get(conv_sym)
+            conv_px = market_price_from_ticker(conv_t)
+            if conv_px:
+                return float(qvol) * float(conv_px)
+        return 0.0
+    except:
+        return 0.0
+
 def symbol_ok(ex_obj, symbol):
     m = ex_obj.markets.get(symbol, {})
     if not m:
         return False
+    # Spot only
     if not m.get("spot", True):
         return False
+    # USD-standardized quotes only
     base, quote = parse_symbol(symbol)
     if quote.upper() not in USD_QUOTES:
         return False
+    # Exclude leveraged/ETP tokens
     if LEV_REGEX.search(symbol):
         return False
+    # Active markets only (if provided)
     if m.get("active") is False:
         return False
     return True
@@ -333,12 +321,14 @@ def choose_common_chain(ex1, ex2, coin, exclude_chains, include_all_chains):
         common = set(nets1.keys()) & set(nets2.keys())
         if not common:
             return "❌ No chain", "❌", "❌"
+        # Build preferred list honoring exclusions
         preferred = [n for n in LOW_FEE_CHAIN_PRIORITY if (include_all_chains or n not in exclude_chains)]
         best = None
         for pref in preferred:
             if pref in common:
                 best = pref; break
         if not best:
+            # fallback: first common, but reject if excluded and not include_all
             candidate = sorted(list(common))[0]
             if not include_all_chains and candidate in exclude_chains:
                 return "❌ No chain", "❌", "❌"
@@ -349,80 +339,162 @@ def choose_common_chain(ex1, ex2, coin, exclude_chains, include_all_chains):
     except:
         return "❌ Unknown", "❌", "❌"
 
-# ------------------- Main Scan -------------------
+# ---------- Core Scan ----------
 def run_scan():
     if not buy_exchanges or not sell_exchanges:
-        st.warning("⚠️ Please select at least one buy and one sell exchange")
-        return pd.DataFrame()
+        st.warning("Please select at least one Buy and one Sell exchange.")
+        return
 
-    results = []
-    for buy_id in buy_exchanges:
-        try:
-            buy_ex = getattr(ccxt, buy_id)(EXTRA_OPTS.get(buy_id, {}))
-            buy_ex.load_markets()
-            buy_tickers = buy_ex.fetch_tickers()
-        except Exception as e:
-            st.error(f"❌ Failed to fetch {buy_id}: {e}")
-            continue
+    try:
+        # 1) init exchanges & load spot markets
+        ex_objs = {}
+        for ex_id in set(buy_exchanges + sell_exchanges):
+            opts = {"enableRateLimit": True, "timeout": 12000}
+            opts.update(EXTRA_OPTS.get(ex_id, {}))
+            ex = getattr(ccxt, ex_id)(opts)
+            ex.load_markets()
+            ex_objs[ex_id] = ex
 
-        for sell_id in sell_exchanges:
-            if buy_id == sell_id:
-                continue
+        # 2) bulk tickers
+        bulk_tickers = {}
+        for ex_id, ex in ex_objs.items():
             try:
-                sell_ex = getattr(ccxt, sell_id)(EXTRA_OPTS.get(sell_id, {}))
-                sell_ex.load_markets()
-                sell_tickers = sell_ex.fetch_tickers()
+                bulk_tickers[ex_id] = ex.fetch_tickers()
             except Exception as e:
-                st.error(f"❌ Failed to fetch {sell_id}: {e}")
-                continue
+                st.warning(f"⚠️ {EXCHANGE_NAMES.get(ex_id, ex_id)} fetch_tickers failed: {e}")
+                bulk_tickers[ex_id] = {}
 
-            common = set(buy_tickers.keys()) & set(sell_tickers.keys())
-            for sym in common:
-                if not (symbol_ok(buy_ex, sym) and symbol_ok(sell_ex, sym)):
+        results = []
+        current_keys = []
+
+        # 3) compare across selected exchange pairs
+        for buy_id in buy_exchanges:
+            for sell_id in sell_exchanges:
+                if buy_id == sell_id:
                     continue
+                buy_ex, sell_ex = ex_objs[buy_id], ex_objs[sell_id]
+                buy_tk, sell_tk = bulk_tickers[buy_id], bulk_tickers[sell_id]
 
-                b_tick = buy_tickers.get(sym)
-                s_tick = sell_tickers.get(sym)
-                b_price = market_price_from_ticker(b_tick)
-                s_price = market_price_from_ticker(s_tick)
-                if not (b_price and s_price):
-                    continue
+                common = set(buy_ex.markets.keys()) & set(sell_ex.markets.keys())
+                symbols = [s for s in common if symbol_ok(buy_ex, s) and symbol_ok(sell_ex, s)]
+                symbols = symbols[:700]  # keep snappy
 
-                spread = ((s_price - b_price) / b_price) * 100
-                if spread < min_profit or spread > max_profit:
-                    continue
+                for sym in symbols:
+                    bt, st_ = buy_tk.get(sym), sell_tk.get(sym)
+                    if not bt or not st_:
+                        continue
+                    if not is_ticker_fresh(bt) or not is_ticker_fresh(st_):
+                        continue
 
-                b_vol = safe_usd_volume(buy_id, sym, b_tick, b_price, buy_tickers)
-                s_vol = safe_usd_volume(sell_id, sym, s_tick, s_price, sell_tickers)
-                min_vol = min(b_vol, s_vol)
-                if min_vol < min_24h_vol_usd:
-                    continue
+                    buy_px = market_price_from_ticker(bt)
+                    sell_px = market_price_from_ticker(st_)
+                    if not buy_px or not sell_px or buy_px <= 0:
+                        continue
 
-                base, _ = parse_symbol(sym)
-                chain, w_ok, d_ok = choose_common_chain(buy_ex, sell_ex, base, exclude_chains, include_all_chains)
-                if chain.startswith("❌"):
-                    continue
+                    vol_usd_buy = safe_usd_volume(buy_id, sym, bt, buy_px, buy_tk)
+                    vol_usd_sell = safe_usd_volume(sell_id, sym, st_, sell_px, sell_tk)
+                    min_vol = min(vol_usd_buy, vol_usd_sell)
+                    if min_vol < min_24h_vol_usd:
+                        continue
 
-                results.append({
-                    "Pair": sym,
-                    "BuyEx": EXCHANGE_NAMES[buy_id],
-                    "SellEx": EXCHANGE_NAMES[sell_id],
-                    "Buy": round(b_price, 6),
-                    "Sell": round(s_price, 6),
-                    "Spread%": round(spread, 2),
-                    "BuyVol": fmt_usd(b_vol),
-                    "SellVol": fmt_usd(s_vol),
-                    "Chain": chain,
-                    "WithdrawOK": w_ok,
-                    "DepositOK": d_ok,
-                })
+                    profit = (sell_px - buy_px) / buy_px * 100
+                    if profit < min_profit or profit > max_profit:
+                        continue
 
-    return pd.DataFrame(results)
+                    base, quote = parse_symbol(sym)
+                    chain, w_ok, d_ok = choose_common_chain(
+                        buy_ex, sell_ex, base, exclude_chains, include_all_chains
+                    )
+                    if chain.startswith("❌"):
+                        continue
+                    if w_ok != "✅" or d_ok != "✅":
+                        continue
 
-# ------------------- Run + Display -------------------
-if scan_now or auto_refresh:
-    df = run_scan()
-    if not df.empty:
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.warning("⚠️ No arbitrage opportunities found")
+                    key = f"{buy_id}-{sell_id}-{sym}"
+                    current_keys.append(key)
+                    observed, expiry = stability_and_expiry(key, profit)
+
+                    results.append({
+                        "buy_ex": buy_id,
+                        "sell_ex": sell_id,
+                        "symbol": sym,
+                        "buy_px": buy_px,
+                        "sell_px": sell_px,
+                        "profit": profit,
+                        "volume": min_vol,
+                        "chain": chain,
+                        "withdraw": w_ok,
+                        "deposit": d_ok,
+                        "observed": observed,
+                        "expiry": expiry,
+                    })
+
+        update_lifetime_for_disappeared(current_keys)
+
+        if not results:
+            st.info("No arbitrage opportunities found.")
+            return
+
+        df = pd.DataFrame(results)
+        df = df.sort_values("profit", ascending=False).reset_index(drop=True)
+
+        # ---------- Render HTML table ----------
+        rows = []
+        for _, r in df.iterrows():
+            rows.append(f"""
+            <tr>
+                <td><b>{EXCHANGE_NAMES.get(r['buy_ex'], r['buy_ex'])}</b></td>
+                <td><b>{EXCHANGE_NAMES.get(r['sell_ex'], r['sell_ex'])}</b></td>
+                <td>{r['symbol']}</td>
+                <td class='num mono'>{r['buy_px']:.6f}</td>
+                <td class='num mono'>{r['sell_px']:.6f}</td>
+                <td class='num spread'>{r['profit']:.2f}%</td>
+                <td class='num'>{fmt_usd(r['volume'])}</td>
+                <td><span class='pill pill-blue'>{r['chain']}</span></td>
+                <td>{r['withdraw']}</td>
+                <td>{r['deposit']}</td>
+                <td class='small'>{r['observed']}</td>
+                <td class='small'>{r['expiry']}</td>
+            </tr>
+            """)
+
+        html = f"""
+        <div class='table-wrap'>
+        <table class='arb-table'>
+        <thead>
+            <tr>
+                <th>Buy @</th>
+                <th>Sell @</th>
+                <th>Pair</th>
+                <th>Buy Price</th>
+                <th>Sell Price</th>
+                <th>Profit %</th>
+                <th>24h Vol</th>
+                <th>Chain</th>
+                <th>W</th>
+                <th>D</th>
+                <th>Observed</th>
+                <th>Expiry</th>
+            </tr>
+        </thead>
+        <tbody>
+            {''.join(rows)}
+        </tbody>
+        </table>
+        </div>
+        """
+        st.markdown(html, unsafe_allow_html=True)
+
+    except Exception as e:
+        st.error(f"❌ Error during scan: {e}")
+
+# ------------------- Main Loop -------------------
+if auto_refresh and not scan_now:
+    placeholder = st.empty()
+    while True:
+        with placeholder.container():
+            run_scan()
+        time.sleep(20)
+else:
+    if scan_now:
+        run_scan()
