@@ -1,3 +1,4 @@
+# full_scanner_patched.py
 import time, re, ccxt, json, os
 import pandas as pd
 import streamlit as st
@@ -149,35 +150,147 @@ if "lifetime_history" not in st.session_state:
 if "last_seen_keys" not in st.session_state:
     st.session_state.last_seen_keys = set()
 
-# ---------- Helpers ----------
+# ---------- Helpers (PATCHED ONLY) ----------
 def parse_symbol(symbol: str):
+    # keep original behavior (don't change signature/return shape)
     base, quote = symbol.split("/")[0], symbol.split("/")[1].split(":")[0]
     return base, quote
 
 def market_price_from_ticker(t):
+    """
+    Robust extraction of a 'market price' from ccxt ticker dict.
+    Prefer 'last' (last trade), then common fallback fields, then 'info' keys,
+    finally fall back to mid of bid/ask if available. Returns float or None.
+    """
     if not t:
         return None
-    last = t.get("last")
-    if last is not None:
-        try:
-            return float(last)
-        except:
-            pass
+
+    # 1) prefer standardized 'last'
+    for k in ("last", "close", "price", "lastPrice", "tradePrice", "last_traded", "lastTradePrice", "lastPrice24h"):
+        # check top-level
+        val = t.get(k)
+        if val is None:
+            # check inside info dict (different exchanges put it here)
+            info = t.get("info") or {}
+            val = info.get(k)
+        if val is not None:
+            try:
+                return float(val)
+            except:
+                # sometimes it's nested or stringy; try coerced float
+                try:
+                    return float(str(val))
+                except:
+                    pass
+
+    # 2) try average/vwap/weighted fields
+    for k in ("average", "vwap", "weightedAverage", "avgPrice"):
+        val = t.get(k) or (t.get("info") or {}).get(k)
+        if val is not None:
+            try:
+                return float(val)
+            except:
+                pass
+
+    # 3) last resort: use bid/ask mid if both present (still preferable to returning None)
     bid, ask = t.get("bid"), t.get("ask")
     if bid is not None and ask is not None:
         try:
             return (float(bid) + float(ask)) / 2.0
         except:
             pass
-    for alt in ["close", "price", "average"]:
-        v = t.get(alt)
-        if v is not None:
-            try:
-                return float(v)
-            except:
-                continue
+
     return None
 
+# extended list of candidate volume keys (search both ticker and ticker['info'])
+INFO_VOLUME_CANDIDATES = [
+    "quoteVolume", "quoteVolume24h", "quote_volume_24h", "quote_volume", "quoteVol24h", "quoteVol",
+    "baseVolume", "baseVolume24h", "base_volume_24h", "base_volume", "baseVol24h", "baseVol",
+    "vol", "vol24h", "volCcy24h", "volValue", "value", "amount", "turnover", "turnover24h",
+    "volume", "volumeUsd", "acc_trade_price_24h",
+    "q", "Q", "v", "volume24h", "quoteAmount"
+]
+
+def safe_usd_volume(ex_id, symbol, ticker, price, all_tickers):
+    """
+    Estimate 24h USD volume for (ex_id, symbol, ticker).
+    Tries:
+      - quoteVolume (already USD if quote is USD-like)
+      - baseVolume * price
+      - common info keys
+      - convert quote-volume using a available quote->USDT pair from all_tickers
+    Returns float USD amount or 0.0 on failure.
+    """
+    try:
+        base, quote = parse_symbol(symbol)
+        q_upper = quote.upper()
+
+        # standard ccxt fields
+        qvol = ticker.get("quoteVolume") or ticker.get("quoteVolume24h") or ticker.get("quote_volume")
+        bvol = ticker.get("baseVolume") or ticker.get("baseVolume24h") or ticker.get("base_volume")
+
+        # Case A: quote is already USD-like and quoteVolume present
+        if q_upper in USD_QUOTES and qvol:
+            try:
+                return float(qvol)
+            except:
+                pass
+
+        # Case B: baseVolume * price (when base volume provided)
+        if bvol and price:
+            try:
+                return float(bvol) * float(price)
+            except:
+                pass
+
+        # Case C: look inside info for many candidate keys
+        info = ticker.get("info") or {}
+        raw = None
+        for key in INFO_VOLUME_CANDIDATES:
+            # check ticker top-level then info
+            val = ticker.get(key)
+            if val is None:
+                val = info.get(key)
+            if val is None:
+                continue
+            try:
+                fval = float(val)
+                if fval > 0:
+                    raw = fval
+                    break
+            except:
+                continue
+
+        if raw is not None:
+            # if quote is USD-like then raw likely already in USD (quoteVolume-like)
+            if q_upper in USD_QUOTES:
+                return float(raw)
+            # else attempt to convert raw (quote-volume) to USD using available quote->USDT/USDC/BUSD/USD pairs
+            for conv_quote in ("USDT", "USDC", "BUSD", "USD"):
+                conv_sym = f"{q_upper}/{conv_quote}"
+                conv_t = all_tickers.get(conv_sym)
+                conv_px = market_price_from_ticker(conv_t)
+                if conv_px:
+                    return float(raw) * float(conv_px)
+
+        # Case D: if qvol exists but we couldn't confirm, try to convert qvol via a conv_sym
+        if qvol:
+            for conv_quote in ("USDT", "USDC", "BUSD", "USD"):
+                conv_sym = f"{q_upper}/{conv_quote}"
+                conv_t = all_tickers.get(conv_sym)
+                conv_px = market_price_from_ticker(conv_t)
+                if conv_px:
+                    try:
+                        return float(qvol) * float(conv_px)
+                    except:
+                        pass
+
+        # final fallback: give up and return 0.0
+        return 0.0
+    except Exception:
+        return 0.0
+
+# ---------- unchanged helpers ----------
 def is_ticker_fresh(t, max_age_sec=300):
     ts = t.get("timestamp")
     if ts is None:
@@ -195,53 +308,7 @@ def fmt_usd(x):
     except:
         return "$0"
 
-INFO_VOLUME_CANDIDATES = [
-    "quoteVolume", "baseVolume", "vol", "vol24h", "volCcy24h", "volValue",
-    "turnover", "turnover24h", "quoteVolume24h", "amount", "value",
-    "acc_trade_price_24h", "quote_volume_24h", "base_volume_24h",
-]
-
-def safe_usd_volume(ex_id, symbol, ticker, price, all_tickers):
-    try:
-        base, quote = parse_symbol(symbol)
-        q_upper = quote.upper()
-        qvol = ticker.get("quoteVolume")
-        bvol = ticker.get("baseVolume")
-        if q_upper in USD_QUOTES and qvol:
-            return float(qvol)
-        if bvol and price:
-            return float(bvol) * float(price)
-        info = ticker.get("info") or {}
-        raw = None
-        for key in INFO_VOLUME_CANDIDATES:
-            val = info.get(key)
-            if val is None:
-                continue
-            try:
-                fval = float(val)
-                if fval > 0:
-                    raw = fval
-                    break
-            except:
-                continue
-        if raw is not None:
-            if q_upper in USD_QUOTES:
-                return float(raw)
-            conv_sym = f"{q_upper}/USDT"
-            conv_t = all_tickers.get(conv_sym)
-            conv_px = market_price_from_ticker(conv_t)
-            if conv_px:
-                return float(raw) * float(conv_px)
-        if qvol:
-            conv_sym = f"{q_upper}/USDT"
-            conv_t = all_tickers.get(conv_sym)
-            conv_px = market_price_from_ticker(conv_t)
-            if conv_px:
-                return float(qvol) * float(conv_px)
-        return 0.0
-    except:
-        return 0.0
-
+# ---------- original functions preserved below (unchanged) ----------
 def symbol_ok(ex_obj, symbol):
     m = ex_obj.markets.get(symbol, {})
     if not m:
