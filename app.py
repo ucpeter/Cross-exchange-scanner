@@ -155,136 +155,134 @@ def stability_and_expiry(k, p):
     else:
         avg = sum(hist) / len(hist); rem = avg - d; exp = "⚠️ past avg" if rem <= 0 else f"~{secs_to_label(rem)} left"
     return obs, exp
-    INFO_VOL_KEYS = ["quoteVolume","baseVolume","vol","vol24h","volCcy24h","volValue","turnover","turnover24h","quoteVolume24h","amount","value","acc_trade_price_24h","quote_volume_24h","base_volume_24h"]
-def safe_usd_volume(eid, sym, t, px, tks):
+    INFO_VOL_KEYS=["quoteVolume","baseVolume","vol","vol24h","volCcy24h","volValue","turnover","turnover24h","quoteVolume24h","amount","value","acc_trade_price_24h","quote_volume_24h","base_volume_24h"]
+def safe_usd_volume(eid,sym,t,px,tks):
     try:
-        b, q = parse_symbol(sym); qU = q.upper(); qv = t.get("quoteVolume") if t else None; bv = t.get("baseVolume") if t else None
+        b,q=parse_symbol(sym);qU=q.upper();qv=t.get("quoteVolume") if t else None;bv=t.get("baseVolume") if t else None
         if qU in USD_QUOTES and qv: return float(qv)
-        if bv and px: return float(bv) * float(px)
-        info = (t.get("info") if t else {}) or {}; raw = None
+        if bv and px: return float(bv)*float(px)
+        info=(t.get("info") if t else {}) or {};raw=None
         for k in INFO_VOL_KEYS:
-            v = info.get(k)
+            v=info.get(k)
             if v is None: continue
-            try:
-                fv = float(v)
-                if fv > 0: raw = fv; break
+            try: fv=float(v); 
             except: continue
+            if fv>0: raw=fv;break
         if raw is not None:
             if qU in USD_QUOTES: return float(raw)
-            conv = f"{qU}/USDT"; ct = tks.get(conv); cp = market_price_from_ticker(ct)
-            if cp: return float(raw) * float(cp)
+            conv=f"{qU}/USDT";ct=tks.get(conv);cp=market_price_from_ticker(ct)
+            if cp: return float(raw)*float(cp)
         if qv:
-            conv = f"{qU}/USDT"; ct = tks.get(conv); cp = market_price_from_ticker(ct)
-            if cp: return float(qv) * float(cp)
+            conv=f"{qU}/USDT";ct=tks.get(conv);cp=market_price_from_ticker(ct)
+            if cp: return float(qv)*float(cp)
         return 0.0
     except: return 0.0
-def symbol_ok(ex, s):
+
+def symbol_ok(ex,s):
     try:
-        m = ex.markets.get(s, {})
-        if not m or not m.get("spot", True): return False
-        b, q = parse_symbol(s)
+        m=ex.markets.get(s,{})
+        if not m or not m.get("spot",True): return False
+        b,q=parse_symbol(s)
         if q.upper() not in USD_QUOTES or LEV_REGEX.search(s) or m.get("active") is False: return False
         return True
     except: return False
-def choose_common_chain(e1, e2, c, excl, inc_all):
+
+def choose_common_chain(e1,e2,c,excl,inc_all):
     try:
-        c1 = e1.currencies.get(c, {}) or {}; c2 = e2.currencies.get(c, {}) or {}
-        n1 = c1.get("networks", {}) or {}; n2 = c2.get("networks", {}) or {}
-        com = set(n1.keys()) & set(n2.keys())
-        if not com: return "❌ No chain", "❌", "❌"
-        pref = [n for n in LOW_FEE_CHAIN_PRIORITY if (inc_all or n not in excl)]; best = None
+        c1=e1.currencies.get(c,{}) or {};c2=e2.currencies.get(c,{}) or {}
+        n1=c1.get("networks",{}) or {};n2=c2.get(c,{}) or {}
+        com=set(n1.keys())&set(n2.keys())
+        if not com: return "❌ No chain","❌","❌"
+        pref=[n for n in LOW_FEE_CHAIN_PRIORITY if (inc_all or n not in excl)];best=None
         for p in pref:
-            if p in com: best = p; break
+            if p in com: best=p;break
         if not best:
-            cand = sorted(list(com))[0]
-            if not inc_all and cand in excl: return "❌ No chain", "❌", "❌"
-            best = cand
-        return best, "✅" if n1.get(best, {}).get("withdraw") else "❌", "✅" if n2.get(best, {}).get("deposit") else "❌"
-    except: return "❌ Unknown", "❌", "❌"
+            cand=sorted(list(com))[0]
+            if not inc_all and cand in excl: return "❌ No chain","❌","❌"
+            best=cand
+        return best,"✅" if n1.get(best,{}).get("withdraw") else "❌","✅" if n2.get(best,{}).get("deposit") else "❌"
+    except: return "❌ Unknown","❌","❌"
 
 def run_scan():
-    if not buy_exchanges or not sell_exchanges: st.warning("Please select at least one Buy and one Sell exchange."); return
+    if not buy_exchanges or not sell_exchanges: st.warning("Please select at least one Buy and one Sell exchange.");return
     try:
-        exs = {}
-        for eid in set(buy_exchanges + sell_exchanges):
+        exs={}
+        for eid in set(buy_exchanges+sell_exchanges):
             try:
-                o = {"enableRateLimit": True, "timeout": 12000}; o.update(EXTRA_OPTS.get(eid, {}))
-                sid = safe_ccxt_id(eid)
-                if not hasattr(ccxt, sid): st.warning(f"⚠️ ccxt has no attribute '{eid}'. Skipping."); continue
-                ex = getattr(ccxt, sid)(o)
+                o={"enableRateLimit":True,"timeout":12000};o.update(EXTRA_OPTS.get(eid,{}))
+                sid=safe_ccxt_id(eid)
+                if not hasattr(ccxt,sid): st.warning(f"⚠️ ccxt has no attribute '{eid}'. Skipping.");continue
+                ex=getattr(ccxt,sid)(o)
                 try: ex.load_markets()
-                except Exception as e: st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid, sid)} load_markets issue: {e}")
-                exs[eid] = ex
-            except Exception as e: st.warning(f"⚠️ Could not instantiate {eid}: {e}"); continue
-        tks = {}; results = []; keys = []
-        for eid, ex in exs.items():
-            try: tks[eid] = safe_fetch_tickers(ex, eid)
-            except Exception as e: st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid, eid)} fetch_tickers failed: {e}"); tks[eid] = {}
+                except Exception as e: st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid,sid)} load_markets issue: {e}")
+                exs[eid]=ex
+            except Exception as e: st.warning(f"⚠️ Could not instantiate {eid}: {e}");continue
+        tks={};results=[];keys=[]
+        for eid,ex in exs.items():
+            try: tks[eid]=safe_fetch_tickers(ex,eid)
+            except Exception as e: st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid,eid)} fetch_tickers failed: {e}");tks[eid]={}
         for b_id in buy_exchanges:
             for s_id in sell_exchanges:
-                if b_id == s_id: continue
-                b_ex, s_ex = exs[b_id], exs[s_id]; btks, stks = tks[b_id], tks[s_id]
-                bmap, smap = build_symbol_map(b_ex), build_symbol_map(s_ex)
-                common = list(set(bmap.keys()) & set(smap.keys()))[:MAX_SYMBOLS_PER_PAIR]
+                if b_id==s_id: continue
+                b_ex,s_ex=exs[b_id],exs[s_id];btks,stks=tks[b_id],tks[s_id]
+                bmap,smap=build_symbol_map(b_ex),build_symbol_map(s_ex)
+                common=list(set(bmap.keys())&set(smap.keys()))[:MAX_SYMBOLS_PER_PAIR]
                 for nsym in common:
                     try:
-                        bc = bmap.get(nsym, []); sc = smap.get(nsym, [])
-                        bm = bc[0] if bc else None; sm = sc[0] if sc else None
+                        bc=bmap.get(nsym,[]);sc=smap.get(nsym,[])
+                        bm=bc[0] if bc else None;sm=sc[0] if sc else None
                         if not bm or not sm: continue
-                        bt, st_ = btks.get(bm), stks.get(sm)
+                        bt,st_=btks.get(bm),stks.get(sm)
                         if not bt or not st_ or not is_ticker_fresh(bt) or not is_ticker_fresh(st_): continue
-                        sym = bm; bp = market_price_from_ticker(bt); sp = market_price_from_ticker(st_)
+                        sym=bm;bp=market_price_from_ticker(bt);sp=market_price_from_ticker(st_)
                         if not bp:
-                            try: ob = b_ex.fetch_order_book(sym, limit=5); bp = (ob.get("bids")[0][0] + ob.get("asks")[0][0]) / 2 if ob.get("bids") and ob.get("asks") else None
-                            except: bp = None
+                            try: ob=b_ex.fetch_order_book(sym,limit=5);bp=(ob.get("bids")[0][0]+ob.get("asks")[0][0])/2 if ob.get("bids") and ob.get("asks") else None
+                            except: bp=None
                         if not sp:
-                            try: ob = s_ex.fetch_order_book(sm, limit=5); sp = (ob.get("bids")[0][0] + ob.get("asks")[0][0]) / 2 if ob.get("bids") and ob.get("asks") else None
-                            except: sp = None
+                            try: ob=s_ex.fetch_order_book(sm,limit=5);sp=(ob.get("bids")[0][0]+ob.get("asks")[0][0])/2 if ob.get("bids") and ob.get("asks") else None
+                            except: sp=None
                         if not bp or not sp: continue
-                        gap = abs(sp - bp) / bp
-                        if gap > 0.5: continue
-                        bf = b_ex.markets.get(sym, {}).get("taker", 0.001) or 0.001; sf = s_ex.markets.get(sm, {}).get("taker", 0.001) or 0.001
-                        spread = (sp - bp) / bp * 100; profit = spread - (bf * 100 + sf * 100)
-                        if profit < min_profit or profit > max_profit: continue
-                        bv = safe_usd_volume(b_id, sym, bt or {}, bp, btks); sv = safe_usd_volume(s_id, sm, st_ or {}, sp, stks)
-                        if (not bt or bv <= 0) and bv < min_24h_vol_usd:
-                            try: ob = b_ex.fetch_order_book(sym, limit=8); bv = sum([float(p) * float(q) for p, q in ob.get("asks", [])[:8]])
-                            except: bv = 0
-                        if (not st_ or sv <= 0) and sv < min_24h_vol_usd:
-                            try: ob = s_ex.fetch_order_book(sm, limit=8); sv = sum([float(p) * float(q) for p, q in ob.get("bids", [])[:8]])
-                            except: sv = 0
-                        if bv < min_24h_vol_usd or sv < min_24h_vol_usd: continue
-                        base, quote = parse_symbol(sym); chain, w, d = choose_common_chain(b_ex, s_ex, base, exclude_chains, include_all_chains)
+                        gap=abs(sp-bp)/bp
+                        if gap>0.5: continue
+                        bf=b_ex.markets.get(sym,{}).get("taker",0.001) or 0.001;sf=s_ex.markets.get(sm,{}).get("taker",0.001) or 0.001
+                        spread=(sp-bp)/bp*100;profit=spread-(bf*100+sf*100)
+                        if profit<min_profit or profit>max_profit: continue
+                        bv=safe_usd_volume(b_id,sym,bt or {},bp,btks);sv=safe_usd_volume(s_id,sm,st_ or {},sp,stks)
+                        if (not bt or bv<=0) and bv<min_24h_vol_usd:
+                            try: ob=b_ex.fetch_order_book(sym,limit=8);bv=sum([float(p)*float(q) for p,q in ob.get("asks",[])[:8]])
+                            except: bv=0
+                        if (not st_ or sv<=0) and sv<min_24h_vol_usd:
+                            try: ob=s_ex.fetch_order_book(sm,limit=8);sv=sum([float(p)*float(q) for p,q in ob.get("bids",[])[:8]])
+                            except: sv=0
+                        if bv<min_24h_vol_usd or sv<min_24h_vol_usd: continue
+                        base,quote=parse_symbol(sym);chain,w,d=choose_common_chain(b_ex,s_ex,base,exclude_chains,include_all_chains)
                         if not include_all_chains and (chain in exclude_chains or str(chain).startswith("❌")): continue
-                        if w != "✅" or d != "✅": continue
-                        k = f"{nsym}|{b_id}>{s_id}"; keys.append(k); obs, exp = stability_and_expiry(k, profit)
+                        if w!="✅" or d!="✅": continue
+                        k=f"{nsym}|{b_id}>{s_id}";keys.append(k);obs,exp=stability_and_expiry(k,profit)
                         results.append({"#":None,"Pair":nsym,"Quote":quote,"Buy@":EXCHANGE_NAMES.get(b_id,b_id),"Buy Price":round(float(bp),10),"Sell@":EXCHANGE_NAMES.get(s_id,s_id),"Sell Price":round(float(sp),10),"Spread %":round(spread,4),"Profit % After Fees":round(profit,4),"Buy Vol (24h)":fmt_usd(bv),"Sell Vol (24h)":fmt_usd(sv),"Withdraw?":w,"Deposit?":d,"Blockchain":chain,"Stability":obs,"Est. Expiry":exp})
                     except: continue
         update_lifetime_for_disappeared(keys)
         if results:
-            df = pd.DataFrame(results).sort_values(["Profit % After Fees","Spread %"],ascending=False).reset_index(drop=True); df["#"] = range(1, len(df)+1)
-           def pill(v,ok=True):
-              cls="pill-green" if ok else "pill-red"
-               return '<span class="pill '+cls+'">'+str(v)+'</span>'
-
-           def cpr(p): return f'<span class="good mono">{p:.4f}%</span>' if p>=0 else f'<span class="bad mono">{p:.4f}%</span>'
-           def cs(s): return f'<span class="spread mono">{s:.4f}%</span>'
-            headers = ["#","Pair","Quote","Buy@","Buy Price","Sell@","Sell Price","Spread %","Profit % After Fees","Buy Vol (24h)","Sell Vol (24h)","Withdraw?","Deposit?","Blockchain","Stability","Est. Expiry"]
-            html = '<div class="table-wrap"><table class="arb-table"><thead><tr>' + "".join([f"<th>{h}</th>" for h in headers]) + "</tr></thead><tbody>"
-            for _, r in df.iterrows():
-                html += "<tr>" + f'<td class="num mono">{int(r["#"])}</td>' + f'<td class="mono">{r["Pair"]}</td>' + f'<td>{r["Quote"]}</td>' + f'<td>{r["Buy@"]}</td>' + f'<td class="num mono">{r["Buy Price"]}</td>' + f'<td>{r["Sell@"]}</td>' + f'<td class="num mono">{r["Sell Price"]}</td>' + f'<td class="num">{cs(r["Spread %"])}</td>' + f'<td class="num">{cpr(r["Profit % After Fees"])}</td>' + f'<td class="num mono">{r["Buy Vol (24h)"]}</td>' + f'<td class="num mono">{r["Sell Vol (24h)"]}</td>' + f'<td>{pill("✅",True) if r["Withdraw?"]=="✅" else pill("❌",False)}</td>' + f'<td>{pill("✅",True) if r["Deposit?"]=="✅" else pill("❌",False)}</td>' + f'<td><span class="pill pill-blue">{r["Blockchain"]}</span></td>' + f'<td class="small">{r["Stability"]}</td>' + f'<td class="small">{r["Est. Expiry"]}</td>' + "</tr>"
-            html += "</tbody></table></div>"
+            df=pd.DataFrame(results).sort_values(["Profit % After Fees","Spread %"],ascending=False).reset_index(drop=True);df["#"]=range(1,len(df)+1)
+            def pill(v,ok=True):
+                cls="pill-green" if ok else "pill-red"
+                return '<span class="pill '+cls+'">'+str(v)+'</span>'
+            def cpr(p): return f'<span class="good mono">{p:.4f}%</span>' if p>=0 else f'<span class="bad mono">{p:.4f}%</span>'
+            def cs(s): return f'<span class="spread mono">{s:.4f}%</span>'
+            headers=["#","Pair","Quote","Buy@","Buy Price","Sell@","Sell Price","Spread %","Profit % After Fees","Buy Vol (24h)","Sell Vol (24h)","Withdraw?","Deposit?","Blockchain","Stability","Est. Expiry"]
+            html='<div class="table-wrap"><table class="arb-table"><thead><tr>'+"".join([f"<th>{h}</th>" for h in headers])+"</tr></thead><tbody>"
+            for _,r in df.iterrows():
+                html+="<tr>"+f'<td class="num mono">{int(r["#"])}</td>'+f'<td class="mono">{r["Pair"]}</td>'+f'<td>{r["Quote"]}</td>'+f'<td>{r["Buy@"]}</td>'+f'<td class="num mono">{r["Buy Price"]}</td>'+f'<td>{r["Sell@"]}</td>'+f'<td class="num mono">{r["Sell Price"]}</td>'+f'<td class="num">{cs(r["Spread %"])}</td>'+f'<td class="num">{cpr(r["Profit % After Fees"])}</td>'+f'<td class="num mono">{r["Buy Vol (24h)"]}</td>'+f'<td class="num mono">{r["Sell Vol (24h)"]}</td>'+f'<td>{pill("✅",True) if r["Withdraw?"]=="✅" else pill("❌",False)}</td>'+f'<td>{pill("✅",True) if r["Deposit?"]=="✅" else pill("❌",False)}</td>'+f'<td><span class="pill pill-blue">{r["Blockchain"]}</span></td>'+f'<td class="small">{r["Stability"]}</td>'+f'<td class="small">{r["Est. Expiry"]}</td>'+"</tr>"
+            html+="</tbody></table></div>"
             st.subheader("✅ Profitable Arbitrage Opportunities")
-            st.markdown(html, unsafe_allow_html=True)
-            st.download_button("⬇️ Download CSV", df.to_csv(index=False), "arbitrage_opportunities.csv", "text/csv")
-        else:
-            st.info("No opportunities matched your profit/volume/chain filters right now.")
-    except Exception as e:
-        st.error(f"Error: {e}")
+            st.markdown(html,unsafe_allow_html=True)
+            st.download_button("⬇️ Download CSV",df.to_csv(index=False),"arbitrage_opportunities.csv","text/csv")
+        else: st.info("No opportunities matched your profit/volume/chain filters right now.")
+    except Exception as e: st.error(f"Error: {e}")
 
 if scan_now or auto_refresh:
     with st.spinner("🔍 Scanning exchanges…"): run_scan()
     if auto_refresh:
-        h = st.empty()
-        for i in range(20,0,-1): h.write(f"⏳ Refreshing in {i}s…"); time.sleep(1)
+        h=st.empty()
+        for i in range(20,0,-1): h.write(f"⏳ Refreshing in {i}s…");time.sleep(1)
         st.experimental_rerun()
