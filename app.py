@@ -263,7 +263,10 @@ def run_scan():
         update_lifetime_for_disappeared(keys)
         if results:
             df = pd.DataFrame(results).sort_values(["Profit % After Fees","Spread %"],ascending=False).reset_index(drop=True); df["#"] = range(1, len(df)+1)
-           def pill(v,ok=True): cls="pill-green" if ok else "pill-red"; return '<span class="pill '+cls+'">'+str(v)+'</span>'
+           def pill(v,ok=True):
+              cls="pill-green" if ok else "pill-red"
+               return '<span class="pill '+cls+'">'+str(v)+'</span>'
+
            def cpr(p): return f'<span class="good mono">{p:.4f}%</span>' if p>=0 else f'<span class="bad mono">{p:.4f}%</span>'
            def cs(s): return f'<span class="spread mono">{s:.4f}%</span>'
             headers = ["#","Pair","Quote","Buy@","Buy Price","Sell@","Sell Price","Spread %","Profit % After Fees","Buy Vol (24h)","Sell Vol (24h)","Withdraw?","Deposit?","Blockchain","Stability","Est. Expiry"]
