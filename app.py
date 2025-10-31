@@ -43,13 +43,35 @@ def is_ticker_fresh(t,max_age=120):
         if not dt: return True
         return (datetime.utcnow()-dt)<timedelta(seconds=max_age)
     except: return True
-def stability_and_expiry(key,profit):
-    now=datetime.utcnow();prev=lifetime_store.get(key)
-    if not prev: lifetime_store[key]=(now,profit);return "New",now+timedelta(minutes=3)
-    first,last=prev
-    if profit>=last: lifetime_store[key]=(first,profit);return f"Stable {profit:.2f}%",now+timedelta(minutes=5)
-    return "Unstable",now+timedelta(minutes=1)
 lifetime_store={}
+def stability_and_expiry(key,profit,t1=None,t2=None):
+    now=datetime.utcnow();prev=lifetime_store.get(key)
+    def ts_to_dt(ts):
+        if not ts: return None
+        try:
+            if isinstance(ts,(int,float)): return datetime.utcfromtimestamp(ts/1000 if ts>1e12 else ts)
+            if isinstance(ts,str): return datetime.fromisoformat(ts.replace("Z","+00:00"))
+        except: return None
+        return None
+    dt1,dt2=ts_to_dt(t1),ts_to_dt(t2)
+    earliest=min([d for d in [dt1,dt2] if d],default=None)
+    if not prev:
+        lifetime_store[key]=(now,profit,earliest)
+        return "New",now+timedelta(minutes=3)
+    first,last,orig=prev
+    if profit>=last:
+        lifetime_store[key]=(first,profit,earliest or orig)
+        age=""
+        if earliest: age_dur=(datetime.utcnow()-earliest).total_seconds();age=f" | est. {int(age_dur//3600)}h {(int(age_dur%3600)//60)}m"
+        return f"Stable {profit:.2f}%{age}",now+timedelta(minutes=5)
+    return "Unstable",now+timedelta(minutes=1)
+def update_lifetime_for_disappeared(keys):
+    global lifetime_store
+    try:
+        for k in list(lifetime_store.keys()):
+            if k not in keys: del lifetime_store[k]
+    except: pass
+
 def safe_fetch_tickers(ex,eid):
     try:
         syms=list(ex.markets.keys())
@@ -167,7 +189,8 @@ def run_scan():
                         base,quote=parse_symbol(sym);chain,w,d=choose_common_chain(b_ex,s_ex,base,exclude_chains,include_all_chains)
                         if not include_all_chains and (chain in exclude_chains or str(chain).startswith("❌")): continue
                         if w!="✅" or d!="✅": continue
-                        k=f"{nsym}|{b_id}>{s_id}";keys.append(k);obs,exp=stability_and_expiry(k,profit)
+                        k=f"{nsym}|{b_id}>{s_id}";keys.append(k)
+                        obs,exp=stability_and_expiry(k,profit,bt.get("timestamp") if bt else None,st_.get("timestamp") if st_ else None)
                         results.append({"#":None,"Pair":nsym,"Quote":quote,"Buy@":EXCHANGE_NAMES.get(b_id,b_id),"Buy Price":round(float(bp),10),"Sell@":EXCHANGE_NAMES.get(s_id,s_id),"Sell Price":round(float(sp),10),"Spread %":round(spread,4),"Profit % After Fees":round(profit,4),"Buy Vol (24h)":fmt_usd(bv),"Sell Vol (24h)":fmt_usd(sv),"Withdraw?":w,"Deposit?":d,"Blockchain":chain,"Stability":obs,"Est. Expiry":exp})
                     except: continue
         update_lifetime_for_disappeared(keys)
