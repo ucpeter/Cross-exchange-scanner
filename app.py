@@ -84,15 +84,22 @@ def update_lifetime_for_disappeared(current_keys):
         for k in to_remove:lifetime_store.pop(k,None)
     except:pass
 def safe_fetch_tickers(ex,eid):
-      try:
+    try:
         syms=list(ex.markets.keys())
-        if eid=="upbit" and len(syms)>200:return ex.fetch_tickers(syms[:200])
+        if eid=="upbit" and len(syms)>200:
+            return ex.fetch_tickers(syms[:200])
         return ex.fetch_tickers()
-    except Exception as e:st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid,eid)} fetch_tickers issue: {e}");return {}
-def normalize_symbol(sym):return sym.replace("/","-").replace(":","-").upper()
+    except Exception as e:
+        st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid,eid)} fetch_tickers issue: {e}")
+        return {}
+
+def normalize_symbol(sym):
+    return sym.replace("/","-").replace(":","-").upper()
+
 def build_symbol_map(ex):
     m=defaultdict(list)
-    for s in ex.markets.keys():m[normalize_symbol(s)].append(s)
+    for s in ex.markets.keys():
+        m[normalize_symbol(s)].append(s)
     return m
 MAX_SYMBOLS_PER_PAIR=200
 INFO_VOL_KEYS=["quoteVolume","baseVolume","vol","vol24h","volCcy24h","volValue","turnover","turnover24h","quoteVolume24h","amount","value","acc_trade_price_24h","quote_volume_24h","base_volume_24h"]
