@@ -2,11 +2,18 @@ import ccxt,streamlit as st,pandas as pd,time,re
 from datetime import datetime,timedelta
 from collections import defaultdict
 
-EXCHANGE_NAMES={"binance":"Binance","okx":"OKX","bybit":"Bybit","kucoin":"KuCoin","gate":"Gate.io","bitget":"Bitget","bitmart":"BitMart","htx":"HTX","bitrue":"Bitrue","poloniex":"Poloniex","coinbase":"Coinbase","gemini":"Gemini","upbit":"Upbit"}
+EXCHANGE_NAMES={"binance":"Binance","okx":"OKX","bybit":"Bybit","kucoin":"KuCoin","gate":"Gate.io","bitget":"Bitget","bitmart":"BitMart","htx":"HTX","bitrue":"Bitrue","poloniex":"Poloniex","coinbase":"Coinbase","gemini":"Gemini","upbit":"Upbit","mexc":"MEXC"}
 USD_QUOTES={"USDT","USDC","BUSD","DAI","USD","TUSD","FDUSD"}
 LOW_FEE_CHAIN_PRIORITY=["TRC20","BEP20","ERC20","SOL","Polygon","Arbitrum","Optimism","Base","AVAXC","ALGO"]
 LEV_REGEX=re.compile(r"[\d]+(S|L|LONG|SHORT|DOWN|UP)$",re.IGNORECASE)
-EXTRA_OPTS={"okx":{"options":{"defaultType":"spot"}},"bybit":{"options":{"defaultType":"spot"}},"bitget":{"options":{"defaultType":"spot"}},"htx":{"urls":{"api":{"public":"https://api.huobi.pro"}}}}
+EXTRA_OPTS={
+ "okx":{"options":{"defaultType":"spot"}},
+ "bybit":{"options":{"defaultType":"spot"}},
+ "bitget":{"options":{"defaultType":"spot"}},
+ "bitmart":{"options":{"defaultType":"spot"}},
+ "htx":{"urls":{"api":{"public":"https://api.huobi.pro"}},"options":{"defaultType":"spot"}},
+ "mexc":{"options":{"defaultType":"spot"}}
+}
 
 st.set_page_config(page_title="🌍 Cross-Exchange Arbitrage Scanner",layout="wide")
 st.title("🌍 Cross-Exchange Arbitrage Scanner")
@@ -27,82 +34,79 @@ include_all_chains=st.checkbox("Include all chains regardless of exclusion list"
 scan_now=st.button("🔍 Run Scan Now")
 auto_refresh=st.checkbox("♻️ Auto Refresh every 20s",value=False)
 
-def safe_ccxt_id(eid): return eid.lower().replace(" ","").replace(".","").replace("_","")
-def fmt_usd(v): 
-    try: return f"${float(v):,.0f}"
-    except: return "N/A"
-def parse_symbol(sym): parts=re.split(r"[-/:]",sym);return parts[0],parts[1] if len(parts)>1 else None
+def safe_ccxt_id(eid):return eid.lower().replace(" ","").replace(".","").replace("_","")
+def fmt_usd(v):
+    try:return f"${float(v):,.0f}"
+    except:return "N/A"
+def parse_symbol(s):p=re.split(r"[-/:]",s);return p[0],p[1] if len(p)>1 else None
 def market_price_from_ticker(t):
-    try: b,a=float(t.get("bid",0)),float(t.get("ask",0));return (b+a)/2 if b and a else float(t.get("last",0))
-    except: return None
+    try:b,a=float(t.get("bid",0)),float(t.get("ask",0));return (b+a)/2 if b and a else float(t.get("last",0))
+    except:return None
 def is_ticker_fresh(t,max_age=120):
     try:
         ts=t.get("timestamp") or t.get("datetime")
-        if ts is None: return True
+        if ts is None:return True
         if isinstance(ts,(int,float)):dt=datetime.utcfromtimestamp(ts/1000 if ts>1e12 else ts)
-        else: dt=datetime.fromisoformat(ts.replace("Z","+00:00")) if isinstance(ts,str) else None
-        if not dt: return True
+        elif isinstance(ts,str):dt=datetime.fromisoformat(ts.replace("Z","+00:00"))
+        else:return True
         return (datetime.utcnow()-dt)<timedelta(seconds=max_age)
-    except: return True
+    except:return True
 
-lifetime_store,lifetime_history,market_seen_first={}, {}, {}
+for name in ["lifetime_store","lifetime_history","market_seen_first"]:
+    if name not in st.session_state:st.session_state[name]={}
+lifetime_store=st.session_state["lifetime_store"];lifetime_history=st.session_state["lifetime_history"];market_seen_first=st.session_state["market_seen_first"]
+
 def _secs_to_label_short(s):
     s=int(s)
     if s<60:return f"{s}s"
     if s<3600:return f"{s//60}m"
     return f"{s//3600}h{(s%3600)//60}m"
-def stability_and_expiry(key,profit,t1=None,t2=None):
-    now=datetime.utcnow()
-    first_seen,prev_profit,orig=lifetime_store.get(key,(None,None,None))
-    if key not in market_seen_first: market_seen_first[key]=now
-    first_seen_market=market_seen_first[key]
-    if not first_seen:first_seen=now
-    lifetime_store[key]=(first_seen,profit,first_seen_market)
-    known_age=(now-first_seen).total_seconds()
-    market_age=(now-first_seen_market).total_seconds()
-    if prev_profit is None: status="New"
-    elif profit>=prev_profit: status="Stable"
-    else: status="Unstable"
-    stability_text=f"{status} (market {_secs_to_label_short(market_age)})"
-    h=lifetime_history.get(key,[])
-    est_expiry="~unknown"
+def stability_and_expiry(k,p,t1=None,t2=None):
+    now=datetime.utcnow();fs,pp,orig=lifetime_store.get(k,(None,None,None))
+    if k not in market_seen_first:market_seen_first[k]=now
+    fsm=market_seen_first[k]
+    if not fs:fs=now
+    lifetime_store[k]=(fs,p,fsm)
+    ma=(now-fsm).total_seconds()
+    if pp is None:stx="New"
+    elif p>=pp:stx="Stable"
+    else:stx="Unstable"
+    stxt=f"{stx} (market {_secs_to_label_short(ma)})"
+    h=lifetime_history.get(k,[]);exp="~unknown"
     if h:
-        avg=sum(h)/len(h);rem=int(avg-market_age)
-        est_expiry="likely ending" if rem<=0 else f"~{_secs_to_label_short(rem)} left"
-    return stability_text,est_expiry
-def update_lifetime_for_disappeared(current_keys):
+        avg=sum(h)/len(h);rem=int(avg-ma);exp="likely ending" if rem<=0 else f"~{_secs_to_label_short(rem)} left"
+    return stxt,exp
+def update_lifetime_for_disappeared(keys):
     try:
-        to_remove=[]
+        rm=[]
         for k,v in list(lifetime_store.items()):
-            if k not in current_keys:
-                first_seen,last_profit,first_seen_market=v
-                dur=(datetime.utcnow()-(first_seen_market or first_seen)).total_seconds()
+            if k not in keys:
+                fs,lp,fsm=v;dur=(datetime.utcnow()-(fsm or fs)).total_seconds()
                 if dur>0:
                     lifetime_history.setdefault(k,[]).append(dur)
                     if len(lifetime_history[k])>30:lifetime_history[k]=lifetime_history[k][-30:]
-                to_remove.append(k)
-        for k in to_remove:lifetime_store.pop(k,None)
+                rm.append(k)
+        for k in rm:lifetime_store.pop(k,None)
     except:pass
 def safe_fetch_tickers(ex,eid):
     try:
+        if not ex.markets:return {}
         syms=list(ex.markets.keys())
-        if eid=="upbit" and len(syms)>200:
-            return ex.fetch_tickers(syms[:200])
+        if eid=="upbit" and len(syms)>200:return ex.fetch_tickers(syms[:200])
         return ex.fetch_tickers()
     except Exception as e:
         st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid,eid)} fetch_tickers issue: {e}")
         return {}
 
-def normalize_symbol(sym):
-    return sym.replace("/","-").replace(":","-").upper()
-
+def normalize_symbol(s):return s.replace("/","-").replace(":","-").upper()
 def build_symbol_map(ex):
     m=defaultdict(list)
-    for s in ex.markets.keys():
-        m[normalize_symbol(s)].append(s)
+    for s in ex.markets.keys():m[normalize_symbol(s)].append(s)
     return m
+
 MAX_SYMBOLS_PER_PAIR=200
 INFO_VOL_KEYS=["quoteVolume","baseVolume","vol","vol24h","volCcy24h","volValue","turnover","turnover24h","quoteVolume24h","amount","value","acc_trade_price_24h","quote_volume_24h","base_volume_24h"]
+
 def safe_usd_volume(eid,sym,t,px,tks):
     try:
         b,q=parse_symbol(sym);qU=q.upper();qv=t.get("quoteVolume") if t else None;bv=t.get("baseVolume") if t else None
@@ -124,6 +128,7 @@ def safe_usd_volume(eid,sym,t,px,tks):
             if cp:return float(qv)*float(cp)
         return 0.0
     except:return 0.0
+
 def symbol_ok(ex,s):
     try:
         m=ex.markets.get(s,{})
@@ -132,6 +137,7 @@ def symbol_ok(ex,s):
         if q.upper() not in USD_QUOTES or LEV_REGEX.search(s) or m.get("active") is False:return False
         return True
     except:return False
+
 def choose_common_chain(e1,e2,c,excl,inc_all):
     try:
         c1=e1.currencies.get(c,{}) or {};c2=e2.currencies.get(c,{}) or {}
@@ -147,24 +153,34 @@ def choose_common_chain(e1,e2,c,excl,inc_all):
             best=cand
         return best,"✅" if n1.get(best,{}).get("withdraw") else "❌","✅" if n2.get(best,{}).get("deposit") else "❌"
     except:return "❌ Unknown","❌","❌"
+
 def run_scan():
-    if not buy_exchanges or not sell_exchanges:st.warning("Please select at least one Buy and one Sell exchange.");return
+    if not buy_exchanges or not sell_exchanges:
+        st.warning("Please select at least one Buy and one Sell exchange.");return
     try:
         exs={}
         for eid in set(buy_exchanges+sell_exchanges):
             try:
                 o={"enableRateLimit":True,"timeout":12000};o.update(EXTRA_OPTS.get(eid,{}))
                 sid=safe_ccxt_id(eid)
-                if not hasattr(ccxt,sid):st.warning(f"⚠️ ccxt has no attribute '{eid}'. Skipping.");continue
+                if not hasattr(ccxt,sid):
+                    st.warning(f"⚠️ ccxt has no attribute '{eid}'. Skipping.");continue
                 ex=getattr(ccxt,sid)(o)
-                try:ex.load_markets()
-                except Exception as e:st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid,sid)} load_markets issue: {e}")
+                try:
+                    mk=ex.load_markets()
+                    if not mk:raise Exception("load_markets() returned None")
+                except Exception as e:
+                    st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid,sid)} load_markets issue: {e}")
+                    continue
                 exs[eid]=ex
-            except Exception as e:st.warning(f"⚠️ Could not instantiate {eid}: {e}");continue
+            except Exception as e:
+                st.warning(f"⚠️ Could not instantiate {eid}: {e}")
+                continue
         tks,results,keys={},[],[]
         for eid,ex in exs.items():
             try:tks[eid]=safe_fetch_tickers(ex,eid)
-            except Exception as e:st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid,eid)} fetch_tickers failed: {e}");tks[eid]={}
+            except Exception as e:
+                st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid,eid)} fetch_tickers failed: {e}");tks[eid]={}
         for b_id in buy_exchanges:
             for s_id in sell_exchanges:
                 if b_id==s_id:continue
@@ -190,7 +206,7 @@ def run_scan():
                         bf=b_ex.markets.get(sym,{}).get("taker",0.001) or 0.001;sf=s_ex.markets.get(sm,{}).get("taker",0.001) or 0.001
                         spread=(sp-bp)/bp*100;profit=spread-(bf*100+sf*100)
                         if profit<min_profit or profit>max_profit:continue
-                        bv=safe_usd_volume(b_id,sym,bt or {},bp,btks);sv=safe_usd_volume(s_id,sm,st_ or {},sp,stks)
+                        bv=safe_usd_volume(b_id,sym,bt,bp,btks);sv=safe_usd_volume(s_id,sym,st_,sp,stks)
                         if bv<min_24h_vol_usd or sv<min_24h_vol_usd:continue
                         base,quote=parse_symbol(sym);chain,w,d=choose_common_chain(b_ex,s_ex,base,exclude_chains,include_all_chains)
                         if not include_all_chains and (chain in exclude_chains or str(chain).startswith("❌")):continue
@@ -202,13 +218,13 @@ def run_scan():
         update_lifetime_for_disappeared(keys)
         if results:
             df=pd.DataFrame(results).sort_values(["Profit % After Fees","Spread %"],ascending=False).reset_index(drop=True);df["#"]=range(1,len(df)+1)
-            def pill(v,ok=True):cls="pill-green" if ok else "pill-red";return '<span class="pill '+cls+'">'+str(v)+'</span>'
+            def pill(v,ok=True):cls="pill-green" if ok else "pill-red";return f'<span class="pill {cls}">{v}</span>'
             def cpr(p):return f'<span class="good mono">{p:.4f}%</span>' if p>=0 else f'<span class="bad mono">{p:.4f}%</span>'
             def cs(s):return f'<span class="spread mono">{s:.4f}%</span>'
-            headers=["#","Pair","Quote","Buy@","Buy Price","Sell@","Sell Price","Spread %","Profit % After Fees","Buy Vol (24h)","Sell Vol (24h)","Withdraw?","Deposit?","Blockchain","Stability","Est. Expiry"]
-            html='<div class="table-wrap"><table class="arb-table"><thead><tr>'+"".join([f"<th>{h}</th>" for h in headers])+"</tr></thead><tbody>"
+            heads=["#","Pair","Quote","Buy@","Buy Price","Sell@","Sell Price","Spread %","Profit % After Fees","Buy Vol (24h)","Sell Vol (24h)","Withdraw?","Deposit?","Blockchain","Stability","Est. Expiry"]
+            html='<div class="table-wrap"><table class="arb-table"><thead><tr>'+"".join([f"<th>{h}</th>" for h in heads])+"</tr></thead><tbody>"
             for _,r in df.iterrows():
-                html+="<tr>"+f'<td class="num mono">{int(r["#"])}</td>'+f'<td class="mono">{r["Pair"]}</td>'+f'<td>{r["Quote"]}</td>'+f'<td>{r["Buy@"]}</td>'+f'<td class="num mono">{r["Buy Price"]}</td>'+f'<td>{r["Sell@"]}</td>'+f'<td class="num mono">{r["Sell Price"]}</td>'+f'<td class="num">{cs(r["Spread %"])}</td>'+f'<td class="num">{cpr(r["Profit % After Fees"])}</td>'+f'<td class="num mono">{r["Buy Vol (24h)"]}</td>'+f'<td class="num mono">{r["Sell Vol (24h)"]}</td>'+f'<td>{pill("✅",True) if r["Withdraw?"]=="✅" else pill("❌",False)}</td>'+f'<td>{pill("✅",True) if r["Deposit?"]=="✅" else pill("❌",False)}</td>'+f'<td><span class="pill pill-blue">{r["Blockchain"]}</span></td>'+f'<td class="small">{r["Stability"]}</td>'+f'<td class="small">{r["Est. Expiry"]}</td>'+"</tr>"
+                html+="<tr>"+f'<td class="num mono">{int(r["#"])}</td><td class="mono">{r["Pair"]}</td><td>{r["Quote"]}</td><td>{r["Buy@"]}</td><td class="num mono">{r["Buy Price"]}</td><td>{r["Sell@"]}</td><td class="num mono">{r["Sell Price"]}</td><td class="num">{cs(r["Spread %"])}</td><td class="num">{cpr(r["Profit % After Fees"])}</td><td class="num mono">{r["Buy Vol (24h)"]}</td><td class="num mono">{r["Sell Vol (24h)"]}</td><td>{pill('✅',True) if r['Withdraw?']=='✅' else pill('❌',False)}</td><td>{pill('✅',True) if r['Deposit?']=='✅' else pill('❌',False)}</td><td><span class="pill pill-blue">{r['Blockchain']}</span></td><td class="small">{r['Stability']}</td><td class="small">{r['Est. Expiry']}</td></tr>"
             html+="</tbody></table></div>"
             st.subheader("✅ Profitable Arbitrage Opportunities")
             st.markdown(html,unsafe_allow_html=True)
@@ -221,6 +237,5 @@ if scan_now or auto_refresh:
     if auto_refresh:
         h=st.empty()
         for i in range(20,0,-1):
-            h.write(f"⏳ Refreshing in {i}s…")
-            time.sleep(1)
+            h.write(f"⏳ Refreshing in {i}s…");time.sleep(1)
         st.experimental_rerun()
