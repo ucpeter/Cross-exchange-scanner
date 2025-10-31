@@ -216,7 +216,7 @@ def run_scan():
                         results.append({"#":None,"Pair":nsym,"Quote":quote,"Buy@":EXCHANGE_NAMES.get(b_id,b_id),"Buy Price":round(bp,10),"Sell@":EXCHANGE_NAMES.get(s_id,s_id),"Sell Price":round(sp,10),"Spread %":round(spread,4),"Profit % After Fees":round(profit,4),"Buy Vol (24h)":fmt_usd(bv),"Sell Vol (24h)":fmt_usd(sv),"Withdraw?":w,"Deposit?":d,"Blockchain":chain,"Stability":obs,"Est. Expiry":exp})
                     except:continue
         update_lifetime_for_disappeared(keys)
-  if results:
+    if results:
     df=pd.DataFrame(results).sort_values(["Profit % After Fees","Spread %"],ascending=False).reset_index(drop=True)
     df["#"]=range(1,len(df)+1)
     def pill(v,ok=True):
