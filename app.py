@@ -1,161 +1,68 @@
-import time ,re ,ccxt ,json ,os
-import pandas as pd
-import streamlit as st
+import ccxt,streamlit as st,pandas as pd,time,re
+from datetime import datetime,timedelta
+from collections import defaultdict
 
-st .set_page_config (page_title ="Cross-Exchange Arbitrage Scanner",layout ="wide")
+EXCHANGE_NAMES={"binance":"Binance","okx":"OKX","bybit":"Bybit","kucoin":"KuCoin","gate":"Gate.io","bitget":"Bitget","bitmart":"BitMart","htx":"HTX","bitrue":"Bitrue","poloniex":"Poloniex","coinbase":"Coinbase","gemini":"Gemini","upbit":"Upbit"}
+USD_QUOTES={"USDT","USDC","BUSD","DAI","USD","TUSD","FDUSD"}
+LOW_FEE_CHAIN_PRIORITY=["TRC20","BEP20","ERC20","SOL","Polygon","Arbitrum","Optimism","Base","AVAXC","ALGO"]
+LEV_REGEX=re.compile(r"[\d]+(S|L|LONG|SHORT|DOWN|UP)$",re.IGNORECASE)
+EXTRA_OPTS={"okx":{"options":{"defaultType":"spot"}},"bybit":{"options":{"defaultType":"spot"}},"bitget":{"options":{"defaultType":"spot"}},"htx":{"urls":{"api":{"public":"https://api.huobi.pro"}}}}
 
-st .markdown ("""
-    <style>
-    body, .stApp { background-color: #111111; color: #E0E0E0; }
-    .stSidebar { background-color: #1A1A1A !important; }
-    .stDataFrame th { background-color: #222 !important; color: #EEE !important; font-weight: 600; }
-    .stDataFrame td { color: #EEE !important; }
-    .stDataFrame tbody tr:nth-child(even) { background-color: #1E1E1E !important; }
-    .stDataFrame tbody tr:hover { background-color: #2A2A2A !important; }
-    .good { color: #4CAF50; font-weight: 600; }
-    .bad { color: #FF5252; font-weight: 600; }
-    .spread { color: #42A5F5; font-weight: 600; }
-    .stButton>button { background-color: #1976D2; color: white; border-radius: 8px; padding: 0.6em 1.2em; font-size: 16px; font-weight: 600; border: none; cursor: pointer; transition: background-color 0.3s ease; }
-    .stButton>button:hover { background-color: #1565C0; }
-    .pill { padding: 2px 10px; border-radius: 999px; font-weight: 700; font-size: 12px; }
-    .pill-green { background: #1B5E20; color: #E8F5E9; border: 1px solid #2E7D32; }
-    .pill-red { background: #7F1D1D; color: #FEE2E2; border: 1px solid #991B1B; }
-    .pill-blue { background: #0D47A1; color: #E3F2FD; border: 1px solid #1565C0; }
-    .table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #2A2A2A; }
-    table.arb-table { width: 100%; border-collapse: collapse; }
-    table.arb-table th, table.arb-table td { padding: 8px 10px; border-bottom: 1px solid #222; }
-    table.arb-table th { background: #1D1D1D; text-align: left; }
-    table.arb-table tr:nth-child(even) { background: #161616; }
-    table.arb-table tr:hover { background: #202020; }
-    .num { text-align: right; white-space: nowrap; }
-    .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .small { color: #BDBDBD; font-size: 12px; }
-    .good { color: #4CAF50; font-weight: 700; }
-    .bad { color: #FF5252; font-weight: 700; }
-    .spread { color: #42A5F5; font-weight: 700; }
-    </style>
-""",unsafe_allow_html=True)
-
+st.set_page_config(page_title="🌍 Cross-Exchange Arbitrage Scanner",layout="wide")
 st.title("🌍 Cross-Exchange Arbitrage Scanner")
 
-SETTINGS_FILE = "settings.json"
-def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE,"r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-def save_settings(s):
-    with open(SETTINGS_FILE,"w") as f:
-        json.dump(s,f)
-saved = load_settings()
+if "buy_exchanges" not in st.session_state: st.session_state.buy_exchanges=[]
+if "sell_exchanges" not in st.session_state: st.session_state.sell_exchanges=[]
+buy_exchanges=st.multiselect("Select Buy Exchanges",list(EXCHANGE_NAMES.keys()),default=st.session_state.buy_exchanges)
+sell_exchanges=st.multiselect("Select Sell Exchanges",list(EXCHANGE_NAMES.keys()),default=st.session_state.sell_exchanges)
+st.session_state.buy_exchanges=buy_exchanges
+st.session_state.sell_exchanges=sell_exchanges
 
-TOP_20_CCXT_EXCHANGES = ["binance","okx","coinbase","kraken","bybit","kucoin","mexc","bitfinex","bitget","gateio","cryptocom","upbit","whitebit","poloniex","bingx","lbank","bitstamp","gemini","bitrue","xt","bitmart","huobi"]
-EXCHANGE_NAMES = {"binance":"Binance","okx":"OKX","coinbase":"Coinbase","kraken":"Kraken","bybit":"Bybit","kucoin":"KuCoin","mexc":"MEXC","bitfinex":"Bitfinex","bitget":"Bitget","gateio":"Gate.io","cryptocom":"Crypto.com","upbit":"Upbit","whitebit":"WhiteBIT","poloniex":"Poloniex","bingx":"BingX","lbank":"LBank","bitstamp":"Bitstamp","gemini":"Gemini","bitrue":"Bitrue","xt":"XT.com","bitmart":"BitMart","huobi":"HTX"}
-EXTRA_OPTS = {"bybit":{"options":{"defaultType":"spot"}},"okx":{"options":{"defaultType":"spot"}},"bingx":{"options":{"defaultType":"spot"}},"mexc":{"options":{"defaultType":"spot"}},"bitrue":{"options":{"defaultType":"spot"}},"xt":{"options":{"defaultType":"spot"}},"bitmart":{"options":{"defaultType":"spot"}},"huobi":{"options":{"defaultType":"spot"}}}
-USD_QUOTES = {"USDT","USD","USDC","BUSD"}
-LOW_FEE_CHAIN_PRIORITY = ["TRC20","BEP20","BSC","SOL","MATIC","ARB","OP","Polygon","TON","AVAX","ETH"]
-LEV_REGEX = re.compile(r"\b(\d+[LS]|UP|DOWN|BULL|BEAR)\b",re.IGNORECASE)
-MAX_SYMBOLS_PER_PAIR = 200
+min_profit=st.number_input("Min Profit %",value=0.5,step=0.1)
+max_profit=st.number_input("Max Profit %",value=15.0,step=0.5)
+min_24h_vol_usd=st.number_input("Min 24h Volume (USD)",value=100000,step=5000)
+exclude_chains=st.multiselect("Exclude Chains",LOW_FEE_CHAIN_PRIORITY,default=["ERC20"])
+include_all_chains=st.checkbox("Include all chains regardless of exclusion list",value=False)
+scan_now=st.button("🔍 Run Scan Now")
+auto_refresh=st.checkbox("♻️ Auto Refresh every 20s",value=False)
 
-st.sidebar.header("Scanner Controls")
-buy_exchanges = st.sidebar.multiselect("Buy Exchanges (up to 10)",TOP_20_CCXT_EXCHANGES,default=saved.get("buy_exchanges",[]),max_selections=10,format_func=lambda x:EXCHANGE_NAMES.get(x,x))
-sell_exchanges = st.sidebar.multiselect("Sell Exchanges (up to 10)",TOP_20_CCXT_EXCHANGES,default=saved.get("sell_exchanges",[]),max_selections=10,format_func=lambda x:EXCHANGE_NAMES.get(x,x))
-min_profit = st.sidebar.number_input("Minimum Profit % (after fees)",0.0,100.0,saved.get("min_profit",1.0),0.1)
-max_profit = st.sidebar.number_input("Maximum Profit % (after fees)",0.0,200.0,saved.get("max_profit",20.0),0.1)
-min_24h_vol_usd = st.sidebar.number_input("Min 24h Volume (USD)",0.0,1_000_000_000.0,saved.get("min_24h_vol_usd",100000.0),50000.0)
-exclude_chains = st.sidebar.multiselect("Exclude Blockchains",["ETH","TRC20","BEP20","BSC","SOL","MATIC","ARB","OP","Polygon","TON","AVAX"],default=saved.get("exclude_chains",["ETH"]))
-include_all_chains = st.sidebar.checkbox("Include all blockchains (ignore exclusion)",value=saved.get("include_all_chains",False))
-auto_refresh = st.sidebar.checkbox("🔄 Auto Refresh Every 20s",value=saved.get("auto_refresh",False))
-scan_now = st.button("🚀 Scan Now")
-if scan_now:
-    save_settings({"buy_exchanges":buy_exchanges,"sell_exchanges":sell_exchanges,"min_profit":min_profit,"max_profit":max_profit,"min_24h_vol_usd":min_24h_vol_usd,"exclude_chains":exclude_chains,"include_all_chains":include_all_chains,"auto_refresh":auto_refresh})
-
-if "op_cache" not in st.session_state: st.session_state.op_cache = {}
-if "lifetime_history" not in st.session_state: st.session_state.lifetime_history = {}
-if "last_seen_keys" not in st.session_state: st.session_state.last_seen_keys = set()
-
-def parse_symbol(s):
-    try:
-        return s.split("/")[0], s.split("/")[1].split(":")[0]
-    except:
-        return s, ""
+def safe_ccxt_id(eid): return eid.lower().replace(" ","").replace(".","").replace("_","")
+def fmt_usd(v): 
+    try: return f"${float(v):,.0f}"
+    except: return "N/A"
+def parse_symbol(sym): parts=re.split(r"[-/:]",sym);return parts[0],parts[1] if len(parts)>1 else None
 def market_price_from_ticker(t):
-    if not t: return None
-    last = t.get("last")
-    if last is not None:
-        try: return float(last)
-        except: pass
-    bid, ask = t.get("bid"), t.get("ask")
-    if bid and ask:
-        try: return (float(bid) + float(ask)) / 2
-        except: return None
-    return None
-def normalize_symbol(s):
+    try: b,a=float(t.get("bid",0)),float(t.get("ask",0));return (b+a)/2 if b and a else float(t.get("last",0))
+    except: return None
+def is_ticker_fresh(t,max_age=120):
     try:
-        return s.split(":")[0].upper().replace('\u2010','-').replace('\u2013','-').strip() if isinstance(s,str) else s
-    except: return s
-def build_symbol_map(ex):
-    m = {}
-    try:
-        for mk in getattr(ex,"markets",{}) or {}:
-            m.setdefault(normalize_symbol(mk), []).append(mk)
-    except: pass
-    return m
-def safe_fetch_tickers(ex, ex_id, symbols=None):
-    try:
-        if symbols: return ex.fetch_tickers(symbols) or {}
-        if ex_id == "upbit":
-            syms = list(getattr(ex,"symbols",[]) or []); out = {}
-            for i in range(0, len(syms), 200):
-                try: out.update(ex.fetch_tickers(syms[i:i+200]) or {})
-                except: break
-            return out
-        try: return ex.fetch_tickers() or {}
-        except:
-            syms = list(getattr(ex,"symbols",[]) or []); out = {}
-            for i in range(0, min(len(syms), 600), 200):
-                try: out.update(ex.fetch_tickers(syms[i:i+200]) or {})
-                except: break
-            return out
-    except: return {}
-def safe_ccxt_id(e): return {"coinbaseexchange":"coinbase","xtcom":"xt","crypto_com":"cryptocom","crypto.com":"cryptocom","coinbasepro":"coinbase","htx":"huobi"}.get(e,e)
-def is_ticker_fresh(t, age=300):
-    if not t: return True
-    ts = t.get("timestamp")
-    if ts is None: return True
-    now = int(time.time()*1000)
-    try: return (now - int(ts)) <= age*1000
+        ts=t.get("timestamp") or t.get("datetime")
+        if ts is None: return True
+        if isinstance(ts,(int,float)):dt=datetime.utcfromtimestamp(ts/1000 if ts>1e12 else ts)
+        else: dt=datetime.fromisoformat(ts.replace("Z","+00:00")) if isinstance(ts,str) else None
+        if not dt: return True
+        return (datetime.utcnow()-dt)<timedelta(seconds=max_age)
     except: return True
-def fmt_usd(x):
+def stability_and_expiry(key,profit):
+    now=datetime.utcnow();prev=lifetime_store.get(key)
+    if not prev: lifetime_store[key]=(now,profit);return "New",now+timedelta(minutes=3)
+    first,last=prev
+    if profit>=last: lifetime_store[key]=(first,profit);return f"Stable {profit:.2f}%",now+timedelta(minutes=5)
+    return "Unstable",now+timedelta(minutes=1)
+lifetime_store={}
+def safe_fetch_tickers(ex,eid):
     try:
-        x = float(x or 0)
-        if x >= 1e9: return f"${x/1e9:.2f}B"
-        if x >= 1e6: return f"${x/1e6:.2f}M"
-        if x >= 1e3: return f"${x/1e3:.0f}K"
-        return f"${x:,.0f}"
-    except: return "$0"
-def secs_to_label(s): return f"{int(s)}s" if s < 90 else f"{s/60:.1f}m"
-def update_lifetime_for_disappeared(keys):
-    gone = st.session_state.last_seen_keys - set(keys)
-    for k in gone:
-        trail = st.session_state.op_cache.get(k, [])
-        if trail:
-            d = trail[-1][0] - trail[0][0]
-            if d > 0: st.session_state.lifetime_history.setdefault(k, []).append(d)
-    st.session_state.last_seen_keys = set(keys)
-def stability_and_expiry(k, p):
-    now = time.time(); trail = st.session_state.op_cache.get(k, [])
-    if not trail: st.session_state.op_cache[k] = [(now, p)]; return "⏳ new", "~unknown"
-    trail.append((now, p)); st.session_state.op_cache[k] = trail[-30:]
-    d = trail[-1][0] - trail[0][0]; obs = f"⏳ {secs_to_label(d)} observed"; hist = st.session_state.lifetime_history.get(k, [])
-    if not hist: exp = "~unknown"
-    else:
-        avg = sum(hist) / len(hist); rem = avg - d; exp = "⚠️ past avg" if rem <= 0 else f"~{secs_to_label(rem)} left"
-    return obs, exp
-    INFO_VOL_KEYS=["quoteVolume","baseVolume","vol","vol24h","volCcy24h","volValue","turnover","turnover24h","quoteVolume24h","amount","value","acc_trade_price_24h","quote_volume_24h","base_volume_24h"]
+        syms=list(ex.markets.keys())
+        if eid=="upbit" and len(syms)>200: return ex.fetch_tickers(syms[:200])
+        return ex.fetch_tickers()
+    except Exception as e: st.warning(f"⚠️ {EXCHANGE_NAMES.get(eid,eid)} fetch_tickers issue: {e}");return {}
+def normalize_symbol(sym): return sym.replace("/","-").replace(":","-").upper()
+def build_symbol_map(ex):
+    m=defaultdict(list)
+    for s in ex.markets.keys(): m[normalize_symbol(s)].append(s)
+    return m
+MAX_SYMBOLS_PER_PAIR=200
+INFO_VOL_KEYS=["quoteVolume","baseVolume","vol","vol24h","volCcy24h","volValue","turnover","turnover24h","quoteVolume24h","amount","value","acc_trade_price_24h","quote_volume_24h","base_volume_24h"]
 def safe_usd_volume(eid,sym,t,px,tks):
     try:
         b,q=parse_symbol(sym);qU=q.upper();qv=t.get("quoteVolume") if t else None;bv=t.get("baseVolume") if t else None
@@ -165,7 +72,7 @@ def safe_usd_volume(eid,sym,t,px,tks):
         for k in INFO_VOL_KEYS:
             v=info.get(k)
             if v is None: continue
-            try: fv=float(v); 
+            try: fv=float(v)
             except: continue
             if fv>0: raw=fv;break
         if raw is not None:
@@ -177,7 +84,6 @@ def safe_usd_volume(eid,sym,t,px,tks):
             if cp: return float(qv)*float(cp)
         return 0.0
     except: return 0.0
-
 def symbol_ok(ex,s):
     try:
         m=ex.markets.get(s,{})
@@ -186,11 +92,10 @@ def symbol_ok(ex,s):
         if q.upper() not in USD_QUOTES or LEV_REGEX.search(s) or m.get("active") is False: return False
         return True
     except: return False
-
 def choose_common_chain(e1,e2,c,excl,inc_all):
     try:
         c1=e1.currencies.get(c,{}) or {};c2=e2.currencies.get(c,{}) or {}
-        n1=c1.get("networks",{}) or {};n2=c2.get(c,{}) or {}
+        n1=c1.get("networks",{}) or {};n2=c2.get("networks",{}) or {}
         com=set(n1.keys())&set(n2.keys())
         if not com: return "❌ No chain","❌","❌"
         pref=[n for n in LOW_FEE_CHAIN_PRIORITY if (inc_all or n not in excl)];best=None
@@ -202,7 +107,6 @@ def choose_common_chain(e1,e2,c,excl,inc_all):
             best=cand
         return best,"✅" if n1.get(best,{}).get("withdraw") else "❌","✅" if n2.get(best,{}).get("deposit") else "❌"
     except: return "❌ Unknown","❌","❌"
-
 def run_scan():
     if not buy_exchanges or not sell_exchanges: st.warning("Please select at least one Buy and one Sell exchange.");return
     try:
@@ -229,11 +133,16 @@ def run_scan():
                 common=list(set(bmap.keys())&set(smap.keys()))[:MAX_SYMBOLS_PER_PAIR]
                 for nsym in common:
                     try:
-                        bc=bmap.get(nsym,[]);sc=smap.get(nsym,[])
-                        bm=bc[0] if bc else None;sm=sc[0] if sc else None
-                        if not bm or not sm: continue
-                        bt,st_=btks.get(bm),stks.get(sm)
-                        if not bt or not st_ or not is_ticker_fresh(bt) or not is_ticker_fresh(st_): continue
+                        bc,sc=bmap.get(nsym,[]),smap.get(nsym,[])
+                        found=False;bm=sm=None;bt=st_=None
+                        for bmc in bc:
+                            for smc in sc:
+                                bt,st_=btks.get(bmc),stks.get(smc)
+                                if not bt or not st_: continue
+                                if not is_ticker_fresh(bt) or not is_ticker_fresh(st_): continue
+                                bm,sm=bmc,smc;found=True;break
+                            if found: break
+                        if not found: continue
                         sym=bm;bp=market_price_from_ticker(bt);sp=market_price_from_ticker(st_)
                         if not bp:
                             try: ob=b_ex.fetch_order_book(sym,limit=5);bp=(ob.get("bids")[0][0]+ob.get("asks")[0][0])/2 if ob.get("bids") and ob.get("asks") else None
@@ -279,7 +188,6 @@ def run_scan():
             st.download_button("⬇️ Download CSV",df.to_csv(index=False),"arbitrage_opportunities.csv","text/csv")
         else: st.info("No opportunities matched your profit/volume/chain filters right now.")
     except Exception as e: st.error(f"Error: {e}")
-
 if scan_now or auto_refresh:
     with st.spinner("🔍 Scanning exchanges…"): run_scan()
     if auto_refresh:
