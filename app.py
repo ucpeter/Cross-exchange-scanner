@@ -45,61 +45,45 @@ def is_ticker_fresh(t,max_age=120):
         return (datetime.utcnow()-dt)<timedelta(seconds=max_age)
     except: return True
 
-lifetime_store,lifetime_history={},{}
+lifetime_store,lifetime_history,market_seen_first={}, {}, {}
 def _secs_to_label_short(s):
-    try:
-        s=int(s)
-        if s<60:return f"{s}s"
-        if s<3600:return f"{s//60}m"
-        return f"{s//3600}h{(s%3600)//60}m"
-    except:return "~?"
+    s=int(s)
+    if s<60:return f"{s}s"
+    if s<3600:return f"{s//60}m"
+    return f"{s//3600}h{(s%3600)//60}m"
 def stability_and_expiry(key,profit,t1=None,t2=None):
     now=datetime.utcnow()
-    def ts_to_dt(ts):
-        if not ts:return None
-        try:
-            if isinstance(ts,(int,float)):return datetime.utcfromtimestamp(ts/1000 if ts>1e12 else ts)
-            if isinstance(ts,str):return datetime.fromisoformat(ts.replace("Z","+00:00"))
-        except:return None
-        return None
-    dt1,dt2=ts_to_dt(t1),ts_to_dt(t2)
-    earliest=min([d for d in (dt1,dt2) if d],default=None)
-    prev=lifetime_store.get(key)
-    if not prev:
-        lifetime_store[key]=(now,profit,earliest)
-        known_age,market_age=0,(datetime.utcnow()-earliest).total_seconds() if earliest else None
-    else:
-        first,last,orig=prev
-        if earliest and (not orig or earliest<orig): orig=earliest
-        lifetime_store[key]=(first,profit,orig)
-        known_age=(now-first).total_seconds();market_age=(now-orig).total_seconds() if orig else None
-    if not prev: stability_text=f"New (market {_secs_to_label_short(market_age)})" if market_age else "New"
-    else:
-        status="Stable" if profit>=last else "Unstable"
-        stability_text=f"{status} (known {_secs_to_label_short(known_age)} / market {_secs_to_label_short(market_age) if market_age else '~?'})"
+    first_seen,prev_profit,orig=lifetime_store.get(key,(None,None,None))
+    if key not in market_seen_first: market_seen_first[key]=now
+    first_seen_market=market_seen_first[key]
+    if not first_seen:first_seen=now
+    lifetime_store[key]=(first_seen,profit,first_seen_market)
+    known_age=(now-first_seen).total_seconds()
+    market_age=(now-first_seen_market).total_seconds()
+    if prev_profit is None: status="New"
+    elif profit>=prev_profit: status="Stable"
+    else: status="Unstable"
+    stability_text=f"{status} (market {_secs_to_label_short(market_age)})"
     h=lifetime_history.get(key,[])
     est_expiry="~unknown"
     if h:
-        avg=sum(h)/len(h);obs=market_age or known_age
-        if obs: 
-            rem=int(avg-obs)
-            est_expiry="likely ending" if rem<=0 else f"~{_secs_to_label_short(rem)} left"
+        avg=sum(h)/len(h);rem=int(avg-market_age)
+        est_expiry="likely ending" if rem<=0 else f"~{_secs_to_label_short(rem)} left"
     return stability_text,est_expiry
 def update_lifetime_for_disappeared(current_keys):
     try:
         to_remove=[]
         for k,v in list(lifetime_store.items()):
             if k not in current_keys:
-                first,last,orig=v
-                dur=(datetime.utcnow()-(orig or first)).total_seconds()
+                first_seen,last_profit,first_seen_market=v
+                dur=(datetime.utcnow()-(first_seen_market or first_seen)).total_seconds()
                 if dur>0:
                     lifetime_history.setdefault(k,[]).append(dur)
                     if len(lifetime_history[k])>30:lifetime_history[k]=lifetime_history[k][-30:]
                 to_remove.append(k)
         for k in to_remove:lifetime_store.pop(k,None)
     except:pass
-
-def safe_fetch_tickers(ex,eid):
+        def safe_fetch_tickers(ex,eid):
     try:
         syms=list(ex.markets.keys())
         if eid=="upbit" and len(syms)>200:return ex.fetch_tickers(syms[:200])
@@ -193,12 +177,6 @@ def run_scan():
                             if found:break
                         if not found:continue
                         sym=bm;bp=market_price_from_ticker(bt);sp=market_price_from_ticker(st_)
-                        if not bp:
-                            try:ob=b_ex.fetch_order_book(sym,limit=5);bp=(ob["bids"][0][0]+ob["asks"][0][0])/2 if ob.get("bids") and ob.get("asks") else None
-                            except:bp=None
-                        if not sp:
-                            try:ob=s_ex.fetch_order_book(sm,limit=5);sp=(ob["bids"][0][0]+ob["asks"][0][0])/2 if ob.get("bids") and ob.get("asks") else None
-                            except:sp=None
                         if not bp or not sp:continue
                         gap=abs(sp-bp)/bp
                         if gap>0.5:continue
@@ -228,14 +206,11 @@ def run_scan():
             st.subheader("✅ Profitable Arbitrage Opportunities")
             st.markdown(html,unsafe_allow_html=True)
             st.download_button("⬇️ Download CSV",df.to_csv(index=False),"arbitrage_opportunities.csv","text/csv")
-        else:
-            st.info("No opportunities matched your profit/volume/chain filters right now.")
-    except Exception as e:
-        st.error(f"Error: {e}")
+        else:st.info("No opportunities matched your profit/volume/chain filters right now.")
+    except Exception as e:st.error(f"Error: {e}")
 
 if scan_now or auto_refresh:
-    with st.spinner("🔍 Scanning exchanges…"):
-        run_scan()
+    with st.spinner("🔍 Scanning exchanges…"):run_scan()
     if auto_refresh:
         h=st.empty()
         for i in range(20,0,-1):
