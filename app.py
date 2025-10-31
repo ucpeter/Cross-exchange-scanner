@@ -83,8 +83,8 @@ def update_lifetime_for_disappeared(current_keys):
                 to_remove.append(k)
         for k in to_remove:lifetime_store.pop(k,None)
     except:pass
-        def safe_fetch_tickers(ex,eid):
-    try:
+    def safe_fetch_tickers(ex,eid):
+      try:
         syms=list(ex.markets.keys())
         if eid=="upbit" and len(syms)>200:return ex.fetch_tickers(syms[:200])
         return ex.fetch_tickers()
