@@ -216,22 +216,48 @@ def run_scan():
                         results.append({"#":None,"Pair":nsym,"Quote":quote,"Buy@":EXCHANGE_NAMES.get(b_id,b_id),"Buy Price":round(bp,10),"Sell@":EXCHANGE_NAMES.get(s_id,s_id),"Sell Price":round(sp,10),"Spread %":round(spread,4),"Profit % After Fees":round(profit,4),"Buy Vol (24h)":fmt_usd(bv),"Sell Vol (24h)":fmt_usd(sv),"Withdraw?":w,"Deposit?":d,"Blockchain":chain,"Stability":obs,"Est. Expiry":exp})
                     except:continue
         update_lifetime_for_disappeared(keys)
-        if results:
-            df=pd.DataFrame(results).sort_values(["Profit % After Fees","Spread %"],ascending=False).reset_index(drop=True);df["#"]=range(1,len(df)+1)
-            def pill(v,ok=True):cls="pill-green" if ok else "pill-red";return f'<span class="pill {cls}">{v}</span>'
-            def cpr(p):return f'<span class="good mono">{p:.4f}%</span>' if p>=0 else f'<span class="bad mono">{p:.4f}%</span>'
-            def cs(s):return f'<span class="spread mono">{s:.4f}%</span>'
-            heads=["#","Pair","Quote","Buy@","Buy Price","Sell@","Sell Price","Spread %","Profit % After Fees","Buy Vol (24h)","Sell Vol (24h)","Withdraw?","Deposit?","Blockchain","Stability","Est. Expiry"]
-            html='<div class="table-wrap"><table class="arb-table"><thead><tr>'+"".join([f"<th>{h}</th>" for h in heads])+"</tr></thead><tbody>"
-            for _,r in df.iterrows():
-              html+="<tr>"+f'<td class="num mono">{int(r["#"])}</td><td class="mono">{r["Pair"]}</td><td>{r["Quote"]}</td><td>{r["Buy@"]}</td><td class="num mono">{r["Buy Price"]}</td><td>{r["Sell@"]}</td><td class="num mono">{r["Sell Price"]}</td><td class="num">{cs(r["Spread %"])}</td><td class="num">{cpr(r["Profit % After Fees"])}</td><td class="num mono">{r["Buy Vol (24h)"]}</td><td class="num mono">{r["Sell Vol (24h)"]}</td><td>{pill('✅',True) if r['Withdraw?']=='✅' else pill('❌',False)}</td><td>{pill('✅',True) if r['Deposit?']=='✅' else pill('❌',False)}</td><td><span class="pill pill-blue">{r['Blockchain']}</span></td><td class="small">{r['Stability']}</td><td class="small">{r['Est. Expiry']}</td></tr>"
-            html+="</tbody></table></div>"
-            st.subheader("✅ Profitable Arbitrage Opportunities")
-            st.markdown(html,unsafe_allow_html=True)
-            st.download_button("⬇️ Download CSV",df.to_csv(index=False),"arbitrage_opportunities.csv","text/csv")
-        else:st.info("No opportunities matched your profit/volume/chain filters right now.")
-    except Exception as e:st.error(f"Error: {e}")
-
+  if results:
+    df=pd.DataFrame(results).sort_values(["Profit % After Fees","Spread %"],ascending=False).reset_index(drop=True)
+    df["#"]=range(1,len(df)+1)
+    def pill(v,ok=True):
+        cls="pill-green" if ok else "pill-red"
+        return f'<span class="pill {cls}">{v}</span>'
+    def cpr(p):
+        return f'<span class="good mono">{p:.4f}%</span>' if p>=0 else f'<span class="bad mono">{p:.4f}%</span>'
+    def cs(s):
+        return f'<span class="spread mono">{s:.4f}%</span>'
+    heads=["#","Pair","Quote","Buy@","Buy Price","Sell@","Sell Price","Spread %","Profit % After Fees",
+           "Buy Vol (24h)","Sell Vol (24h)","Withdraw?","Deposit?","Blockchain","Stability","Est. Expiry"]
+    html='<div class="table-wrap"><table class="arb-table"><thead><tr>' + \
+         "".join([f"<th>{h}</th>" for h in heads]) + "</tr></thead><tbody>"
+    for _, r in df.iterrows():
+        row  = "<tr>"
+        row += f'<td class="num mono">{int(r["#"])}</td>'
+        row += f'<td class="mono">{r["Pair"]}</td>'
+        row += f'<td>{r["Quote"]}</td>'
+        row += f'<td>{r["Buy@"]}</td>'
+        row += f'<td class="num mono">{r["Buy Price"]}</td>'
+        row += f'<td>{r["Sell@"]}</td>'
+        row += f'<td class="num mono">{r["Sell Price"]}</td>'
+        row += f'<td class="num">{cs(r["Spread %"])}</td>'
+        row += f'<td class="num">{cpr(r["Profit % After Fees"])}</td>'
+        row += f'<td class="num mono">{r["Buy Vol (24h)"]}</td>'
+        row += f'<td class="num mono">{r["Sell Vol (24h)"]}</td>'
+        row += f'<td>{pill("✅",True) if r["Withdraw?"]=="✅" else pill("❌",False)}</td>'
+        row += f'<td>{pill("✅",True) if r["Deposit?"]=="✅" else pill("❌",False)}</td>'
+        row += f'<td><span class="pill pill-blue">{r["Blockchain"]}</span></td>'
+        row += f'<td class="small">{r["Stability"]}</td>'
+        row += f'<td class="small">{r["Est. Expiry"]}</td>'
+        row += "</tr>"
+        html += row
+    html += "</tbody></table></div>"
+    st.subheader("✅ Profitable Arbitrage Opportunities")
+    st.markdown(html, unsafe_allow_html=True)
+    st.download_button("⬇️ Download CSV", df.to_csv(index=False), "arbitrage_opportunities.csv", "text/csv")
+else:
+    st.info("No opportunities matched your profit/volume/chain filters right now.")
+except Exception as e:
+    st.error(f"Error: {e}")
 if scan_now or auto_refresh:
     with st.spinner("🔍 Scanning exchanges…"):run_scan()
     if auto_refresh:
