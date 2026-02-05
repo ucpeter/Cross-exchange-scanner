@@ -2,9 +2,14 @@ Flask==2.3.3
 Flask-CORS==4.0.0
 ccxt==4.0.73
 pandas==2.0.3
-numpy==1.24.3
+setuptools==71.1.0
 tenacity==8.2.2
 aiohttp==3.8.5
 python-dotenv==1.0.0
 gunicorn==21.2.0
-setuptools==71.1.0 # <-- Add this specific version
+
+# Install numpy based on Python version
+# For Python 3.11 (stable, compatible version)
+numpy==1.24.3; python_version < '3.12'
+# For Python 3.12+ (if you want a future-proof option)
+numpy; python_version >= '3.12'
