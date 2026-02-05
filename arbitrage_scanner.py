@@ -613,7 +613,7 @@ def get_settings():
     settings = load_settings()
     return jsonify({
         "settings": settings,
-        "exchanges": TOP_CCXT_EXCHANGES,
+        "exchanges": TOP_20_CCXT_EXCHANGES,
         "exchange_names": EXCHANGE_NAMES
     })
 
