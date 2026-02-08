@@ -53,7 +53,7 @@ EXCHANGE_CONFIGS = {
     "bingx": {"enableRateLimit": True, "timeout": 10000, "options": {"defaultType": "spot"}},
     "kucoin": {"enableRateLimit": True, "timeout": 10000},
     "gateio": {"enableRateLimit": True, "timeout": 10000},
-    "bitget": {"enableRateLimit": True, "timeout": 10000, "options": {"defaultType": "spot", "apiVersion": "v2"}},
+    "bitget": {"enableRateLimit": True, "timeout": 10000, "options": {"defaultType": "spot", "version": "v2"}},
     "coinbase": {"enableRateLimit": True, "timeout": 10000},
     "kraken": {"enableRateLimit": True, "timeout": 10000},
     "bitfinex": {"enableRateLimit": True, "timeout": 10000},
